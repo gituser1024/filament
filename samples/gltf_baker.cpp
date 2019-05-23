@@ -82,7 +82,7 @@ struct App {
     image::LinearImage meshNormals;
     image::LinearImage meshPositions;
     bool showOverlay = false;
-    bool enablePrepScale = true;
+    bool enablePrepScale = false;
     View* overlayView = nullptr;
     Scene* overlayScene = nullptr;
     VertexBuffer* overlayVb = nullptr;
@@ -532,7 +532,7 @@ static void exportAsset(App& app) {
 int main(int argc, char** argv) {
     App app;
 
-    app.config.title = "gltf_baker";
+    app.config.title = "FlightHelmet.gltf";
     app.config.iblDirectory = FilamentApp::getRootPath() + DEFAULT_IBL;
     app.requestOverlayUpdate = false;
     app.requestStatePop = false;
@@ -582,16 +582,23 @@ int main(int argc, char** argv) {
             const ImVec4 enabled = ImGui::GetStyle().Colors[ImGuiCol_Text];
             ImGui::GetStyle().FrameRounding = 5;
 
+            const ImVec4 button = ImGui::GetStyle().Colors[ImGuiCol_Button];
+            ImGui::GetStyle().Colors[ImGuiCol_Button] = ImVec4(0.5, 0.5, 0.0, 1.0);
+
+            ImGui::Spacing();
+            ImGui::Spacing();
+
             // Prep action (flattening and parameterizing).
             const bool canPrep = app.state == LOADED;
-            ImGui::PushStyleColor(ImGuiCol_Text, canPrep ? enabled : disabled);
-            if (ImGui::Button("Prep", ImVec2(100, 50)) && canPrep) {
-                prepAsset(app);
-            }
+            ImGui::BeginGroup();
+            // ImGui::PushStyleColor(ImGuiCol_Text, disabled);
+            // if (ImGui::Button("Reload", ImVec2(100, 50)) && canPrep) {
+            //     prepAsset(app);
+            // }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Flattens the asset and generates a new set of UV coordinates.");
             }
-            ImGui::PopStyleColor();
+            // ImGui::PopStyleColor();
 
             // Render action (invokes path tracer).
             #ifdef FILAMENT_HAS_EMBREE
@@ -599,14 +606,15 @@ int main(int argc, char** argv) {
             #else
             const bool canRender = false;
             #endif
-            ImGui::PushStyleColor(ImGuiCol_Text, canRender ? enabled : disabled);
-            if (ImGui::Button("Render", ImVec2(100, 50)) && canRender) {
-                renderAsset(app);
+            // ImGui::PushStyleColor(ImGuiCol_Text, canRender ? enabled : disabled);
+            ImGui::SameLine();
+            if (ImGui::Button("Test Render", ImVec2(100, 50))) {
+                prepAsset(app);
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Renders the asset using a pathtracer.");
             }
-            ImGui::PopStyleColor();
+            // ImGui::PopStyleColor();
 
             // Bake action (invokes path tracer).
             #ifdef FILAMENT_HAS_EMBREE
@@ -614,69 +622,101 @@ int main(int argc, char** argv) {
             #else
             const bool canBake = false;
             #endif
-            ImGui::PushStyleColor(ImGuiCol_Text, canBake ? enabled : disabled);
-            if (ImGui::Button("Bake", ImVec2(100, 50)) && canBake) {
-                bakeAsset(app);
+            // ImGui::PushStyleColor(ImGuiCol_Text, canBake ? enabled : disabled);
+            ImGui::SameLine();
+            if (ImGui::Button("Bake AO", ImVec2(100, 50)) && canBake) {
+                renderAsset(app);
+                //bakeAsset(app);
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Invokes an embree-based pathtracer.");
             }
-            ImGui::PopStyleColor();
+            // ImGui::PopStyleColor();
 
             // Export action
             const bool canExport = app.state == BAKED;
-            ImGui::PushStyleColor(ImGuiCol_Text, canExport ? enabled : disabled);
-            if (ImGui::Button("Export", ImVec2(100, 50)) && canExport) {
+            ImGui::PushStyleColor(ImGuiCol_Text, enabled); // canExport ? enabled : disabled);
+            ImGui::SameLine();
+            if (ImGui::Button("Export...", ImVec2(100, 50)) && canExport) {
                 exportAsset(app);
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Saves the baked result to disk.");
             }
+            ImGui::EndGroup();
             ImGui::PopStyleColor();
             ImGui::GetStyle().FrameRounding = 20;
+            ImGui::GetStyle().Colors[ImGuiCol_Button] = button;
 
-            // Options
-            if (app.ambientOcclusion) {
-                ImGui::Checkbox("Show embree result", &app.showOverlay);
+            ImGui::Spacing();
+            ImGui::Spacing();
+
+            if (ImGui::CollapsingHeader("Results", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Indent();
+                int foo = 1;
+                ImGui::RadioButton("3D model with original materials", &foo, 0);
+                ImGui::RadioButton("3D model with original materials + new occlusion", &foo, 0);
+                ImGui::RadioButton("3D model with new occlusion only", &foo, 1);
+                ImGui::RadioButton("3D model with UV visualization", &foo, 2);
+                ImGui::RadioButton("2D texture view (occlusion)", &foo, 3);
+                ImGui::RadioButton("2D texture view (bent normals)", &foo, 4);
+                ImGui::Button(" Save occlusion... ");
+                ImGui::SameLine();
+                ImGui::Button(" Save bent normals... ");
+                ImGui::Unindent();
+                ImGui::Spacing();
             }
-            if (canPrep) {
-                ImGui::Checkbox("Auto-scale before parameterization", &app.enablePrepScale);
-            }
-            if (canBake) {
+
+            if (ImGui::CollapsingHeader("Test Render")) {}
+
+            if (ImGui::CollapsingHeader("Bake AO")) {
+
+                ImGui::Indent();
+
                 static const int kFirstOption = std::log2(512);
                 int bakeOption = std::log2(app.bakeResolution) - kFirstOption;
-                ImGui::Combo("Bake Resolution", &bakeOption,
+                ImGui::Combo("Texture size", &bakeOption,
                         "512 x 512\0"
                         "1024 x 1024\0"
                         "2048 x 2048\0");
                 app.bakeResolution = 1 << (bakeOption + kFirstOption);
-            }
 
-            if (app.statusText) {
-                // Apply a poor man's animation to the ellipsis to indicate that work is being done.
-                static const char* suffixes[] = { "...", "......", "........." };
-                static float suffixAnim = 0;
-                suffixAnim += 0.05f;
-                const char* suffix = suffixes[int(suffixAnim) % 3];
+                bool mockup = true;
+                int samples = 256;
+                ImGui::InputInt("Samples per pixel", &samples);
+                ImGui::Checkbox("Omit primitives that already have occlusion", &mockup);
+                ImGui::Checkbox("Omit non-lit primitives", &mockup);
+                ImGui::Checkbox("Apply denoiser", &mockup);
+                ImGui::Checkbox("Scale model before baking", &app.enablePrepScale);
 
-                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {10, 10} );
-                ImGui::Text("%s%s", app.statusText->c_str(), suffix);
-                ImGui::PopStyleVar();
-            }
+                if (app.statusText) {
+                    // Apply a poor man's animation to the ellipsis to indicate that work is being done.
+                    static const char* suffixes[] = { "...", "......", "........." };
+                    static float suffixAnim = 0;
+                    suffixAnim += 0.05f;
+                    const char* suffix = suffixes[int(suffixAnim) % 3];
 
-            if (app.messageBoxText) {
-                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {10, 10} );
-                ImGui::OpenPopup("MessageBox");
-                if (ImGui::BeginPopupModal("MessageBox", nullptr,
-                        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
-                    ImGui::TextUnformatted(app.messageBoxText->c_str());
-                    if (ImGui::Button("OK", ImVec2(120,0))) {
-                        app.messageBoxText.reset();
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::EndPopup();
+                    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {10, 10} );
+                    ImGui::Text("%s%s", app.statusText->c_str(), suffix);
+                    ImGui::PopStyleVar();
                 }
-                ImGui::PopStyleVar();
+
+                if (app.messageBoxText) {
+                    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {10, 10} );
+                    ImGui::OpenPopup("MessageBox");
+                    if (ImGui::BeginPopupModal("MessageBox", nullptr,
+                            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+                        ImGui::TextUnformatted(app.messageBoxText->c_str());
+                        if (ImGui::Button("OK", ImVec2(120,0))) {
+                            app.messageBoxText.reset();
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::EndPopup();
+                    }
+                    ImGui::PopStyleVar();
+                }
+                ImGui::Spacing();
+                ImGui::Unindent();
             }
         });
 

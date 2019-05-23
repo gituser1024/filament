@@ -118,7 +118,7 @@ public:
      */
     void setUiCallback(std::function<void()> callback) { mCustomUI = callback; }
 
-    static constexpr int INITIAL_SIDEBAR_WIDTH = 350;
+    static constexpr int INITIAL_SIDEBAR_WIDTH = 460;
 
 private:
     // Immutable properties set from the constructor.
@@ -354,7 +354,7 @@ void SimpleViewer::updateUserInterface() {
         mCustomUI();
     }
 
-    if (ImGui::CollapsingHeader("View")) {
+    if (ImGui::CollapsingHeader("Filament View")) {
         ImGui::Checkbox("Dithering", &mEnableDithering);
         ImGui::Checkbox("Depth prepass", &mEnablePrepass);
         ImGui::Checkbox("FXAA", &mEnableFxaa);
@@ -370,7 +370,7 @@ void SimpleViewer::updateUserInterface() {
     mView->setAmbientOcclusion(
             mEnableSsao ? View::AmbientOcclusion::SSAO : View::AmbientOcclusion::NONE);
 
-    if (ImGui::CollapsingHeader("Light", headerFlags)) {
+    if (ImGui::CollapsingHeader("Filament Light", headerFlags)) {
         ImGui::SliderFloat("IBL intensity", &mIblIntensity, 0.0f, 100000.0f);
         ImGui::SliderAngle("IBL rotation", &mIblRotation);
         ImGui::SliderFloat("Sun intensity", &mSunlightIntensity, 50000.0, 150000.0f);
@@ -388,7 +388,7 @@ void SimpleViewer::updateUserInterface() {
     }
 
     if (mAsset != nullptr) {
-        if (ImGui::CollapsingHeader("Model", headerFlags)) {
+        if (ImGui::CollapsingHeader("Model Info", headerFlags)) {
             if (mAnimator->getAnimationCount() > 0) {
                 intptr_t animationsNodeId = -1;
                 ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen;
