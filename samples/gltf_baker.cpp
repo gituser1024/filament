@@ -350,47 +350,7 @@ static void loadAsset(App& app) {
     FilamentApp::get().setWindowTitle(app.filename.getName().c_str());
 }
 
-static void parameterizeAsset(App& app) {
-
-    if (AssetPipeline::isParameterized(app.asset->getSourceAsset())) {
-        puts("Already parameterized.");
-        return;
-    }
-
-    app.state = PARAMETRIZING;
-
-    utils::JobSystem* js = utils::JobSystem::getJobSystem();
-    utils::JobSystem::Job* parent = js->createJob();
-    utils::JobSystem::Job* prep = utils::jobs::createJob(*js, parent, [&app] {
-        gltfio::AssetPipeline::AssetHandle asset = app.asset->getSourceAsset();
-
-        auto pipeline = new gltfio::AssetPipeline();
-
-        app.statusText = std::make_shared<std::string>("Parameterizing");
-        asset = pipeline->parameterize(asset);
-        app.statusText.reset();
-
-        if (!asset) {
-            app.messageBoxText = std::make_shared<std::string>(
-                    "Unable to parameterize mesh, check terminal output for details.");
-            app.pushedState = LOADED;
-            app.requestStatePop = true;
-            delete pipeline;
-            return;
-        }
-
-        loadAsset(app, asset);
-
-        app.pushedState = PARAMETRIZED;
-        app.requestStatePop = true;
-
-        delete app.pipeline;
-        app.pipeline = pipeline;
-    });
-    js->run(prep);
-}
-
-static void renderAsset(App& app) {
+static void actionTestRender(App& app) {
     app.pushedState = app.state;
     app.state = RENDERING;
     gltfio::AssetPipeline::AssetHandle asset = app.asset->getSourceAsset();
@@ -455,62 +415,95 @@ static void generateUvVisualization(const utils::Path& pngOutputPath) {
             pngOutputPath.c_str());
 }
 
-static void bakeAsset(App& app) {
-    app.state = BAKING;
-    gltfio::AssetPipeline::AssetHandle asset = app.asset->getSourceAsset();
-
-    // Allocate the render target for the path tracer as well as a GPU texture to display it.
-    ImVec2 viewportSize = ImGui::GetIO().DisplaySize;
-    const uint32_t res = app.bakeResolution;
-    viewportSize.x -= app.viewer->getSidebarWidth();
-    app.showOverlay = true;
-    app.ambientOcclusion = image::LinearImage(res, res, 1);
-    createOverlayTexture(app);
-
+static void actionBakeAo(App& app) {
+    using namespace image;
     using filament::math::ushort2;
-    auto onRenderTile = [](ushort2, ushort2, void* userData) {
-        App* app = (App*) userData;
-        app->requestOverlayUpdate = true;
+
+    auto doRender = [&app] {
+        app.state = BAKING;
+        gltfio::AssetPipeline::AssetHandle asset = app.asset->getSourceAsset();
+
+        // Allocate the render target for the path tracer as well as a GPU texture to display it.
+        const uint32_t res = app.bakeResolution;
+        app.showOverlay = true;
+        app.ambientOcclusion = image::LinearImage(res, res, 1);
+        app.bentNormals = image::LinearImage(res, res, 3);
+        app.meshNormals = image::LinearImage(res, res, 3);
+        app.meshPositions = image::LinearImage(res, res, 3);
+        createOverlayTexture(app);
+
+        auto onRenderTile = [](ushort2, ushort2, void* userData) {
+            App* app = (App*) userData;
+            app->requestOverlayUpdate = true;
+        };
+
+        auto onRenderDone = [](void* userData) {
+            App* app = (App*) userData;
+            app->requestOverlayUpdate = true;
+            app->state = BAKED;
+
+            #if DEBUG_PATHTRACER
+            auto fmt = ImageEncoder::Format::PNG_LINEAR;
+            std::ofstream bn("bentNormals.png", std::ios::binary | std::ios::trunc);
+            image::LinearImage img = image::verticalFlip(image::vectorsToColors(app->bentNormals));
+            ImageEncoder::encode(bn, fmt, img, "", "bentNormals.png");
+            std::ofstream mn("meshNormals.png", std::ios::binary | std::ios::trunc);
+            img = image::verticalFlip(image::vectorsToColors(app->meshNormals));
+            ImageEncoder::encode(mn, fmt, img, "", "meshNormals.png");
+            std::ofstream mp("meshPositions.png", std::ios::binary | std::ios::trunc);
+            img = image::verticalFlip(image::vectorsToColors(app->meshPositions));
+            ImageEncoder::encode(mp, fmt, img, "", "meshPositions.png");
+            #endif
+        };
+
+        image::LinearImage outputs[] = {
+            app.ambientOcclusion, app.bentNormals, app.meshNormals, app.meshPositions
+        };
+        app.pipeline->bakeAllOutputs(asset, outputs, onRenderTile, onRenderDone, &app);
     };
 
-#if DEBUG_PATHTRACER
-    image::LinearImage outputs[] = {
-        app.ambientOcclusion,
-        app.bentNormals = image::LinearImage(res, res, 3),
-        app.meshNormals = image::LinearImage(res, res, 3),
-        app.meshPositions = image::LinearImage(res, res, 3)
+    auto parameterizeJob = [&app, doRender] {
+        gltfio::AssetPipeline::AssetHandle asset = app.asset->getSourceAsset();
+
+        auto pipeline = new gltfio::AssetPipeline();
+
+        app.statusText = std::make_shared<std::string>("Parameterizing");
+        asset = pipeline->parameterize(asset);
+        app.statusText.reset();
+
+        if (!asset) {
+            app.messageBoxText = std::make_shared<std::string>(
+                    "Unable to parameterize mesh, check terminal output for details.");
+            app.pushedState = LOADED;
+            app.requestStatePop = true;
+            delete pipeline;
+            return;
+        }
+
+        loadAsset(app, asset);
+
+        app.pushedState = PARAMETRIZED;
+        app.requestStatePop = true;
+
+        delete app.pipeline;
+        app.pipeline = pipeline;
+
+        doRender();
     };
-    auto onRenderDone = [](void* userData) {
-        App* app = (App*) userData;
-        using namespace image;
-        auto fmt = ImageEncoder::Format::PNG_LINEAR;
 
-        std::ofstream bn("bentNormals.png", std::ios::binary | std::ios::trunc);
-        image::LinearImage img = image::verticalFlip(image::vectorsToColors(app->bentNormals));
-        ImageEncoder::encode(bn, fmt, img, "", "bentNormals.png");
-
-        std::ofstream mn("meshNormals.png", std::ios::binary | std::ios::trunc);
-        img = image::verticalFlip(image::vectorsToColors(app->meshNormals));
-        ImageEncoder::encode(mn, fmt, img, "", "meshNormals.png");
-
-        std::ofstream mp("meshPositions.png", std::ios::binary | std::ios::trunc);
-        img = image::verticalFlip(image::vectorsToColors(app->meshPositions));
-        ImageEncoder::encode(mp, fmt, img, "", "meshPositions.png");
-
-        app->state = BAKED;
-    };
-    app.pipeline->bakeAllOutputs(asset, outputs, onRenderTile, onRenderDone, &app);
-#else
-    auto onRenderDone = [](void* userData) {
-        App* app = (App*) userData;
-        app->requestOverlayUpdate = true;
-        app->state = BAKED;
-    };
-    app.pipeline->bakeAmbientOcclusion(asset, app.ambientOcclusion, onRenderTile, onRenderDone, &app);
-#endif
+    if (AssetPipeline::isParameterized(app.asset->getSourceAsset())) {
+        puts("Already parameterized.");
+        doRender();
+    } else {
+        app.state = PARAMETRIZING;
+        utils::JobSystem* js = utils::JobSystem::getJobSystem();
+        utils::JobSystem::Job* parent = js->createJob();
+        utils::JobSystem::Job* prep = utils::jobs::createJob(*js, parent, parameterizeJob);
+        js->run(prep);
+    }
 }
 
-static void exportAsset(App& app) {
+static void actionExport(App& app) {
     using namespace image;
 
     const utils::Path folder = app.filename.getAbsolutePath().getParent();
@@ -598,42 +591,26 @@ int main(int argc, char** argv) {
             const ImVec4 disabled = ImGui::GetStyle().Colors[ImGuiCol_TextDisabled];
             const ImVec4 hovered = ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered];
             const ImVec4 enabled = ImVec4(0.5, 0.5, 0.0, 1.0);
+
+            // Action buttons
             ImGui::GetStyle().FrameRounding = 5;
-
             ImGui::PushStyleColor(ImGuiCol_Button, enabled);
-
             ImGui::Spacing();
             ImGui::Spacing();
             ImGui::BeginGroup();
-
-            // Test render action (invokes path tracer).
             if (ImGui::Button("Test Render", ImVec2(100, 50))) {
-                renderAsset(app);
+                actionTestRender(app);
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Renders the asset using a pathtracer.");
+                ImGui::SetTooltip("Renders the asset from the current camera using a pathtracer.");
             }
-
-            // Parameterize action.
             ImGui::SameLine();
-            if (ImGui::Button("Parameterize", ImVec2(100, 50))) {
-                parameterizeAsset(app);
+            if (ImGui::Button("Bake AO", ImVec2(100, 50))) {
+                actionBakeAo(app);
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Generates a new set of UV coordinates.");
+                ImGui::SetTooltip("Generates a new set of UVs and invokes a pathtracer.");
             }
-
-            // Bake action (invokes path tracer).
-            const bool canBake = app.state == PARAMETRIZED;
-            ImGui::SameLine();
-            if (ImGui::Button("Bake AO", ImVec2(100, 50)) && canBake) {
-                bakeAsset(app);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Invokes an embree-based pathtracer.");
-            }
-
-            // Export action
             const bool canExport = app.state == BAKED;
             ImGui::PushStyleColor(ImGuiCol_Button, canExport ? enabled : disabled);
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, canExport ? hovered : disabled);
@@ -646,29 +623,26 @@ int main(int argc, char** argv) {
             }
             ImGui::PopStyleColor();
             ImGui::PopStyleColor();
-            ImGui::GetStyle().FrameRounding = 20;
-
             ImGui::EndGroup();
+            ImGui::Spacing();
+            ImGui::Spacing();
             ImGui::PopStyleColor();
-            ImGui::Spacing();
-            ImGui::Spacing();
+            ImGui::GetStyle().FrameRounding = 20;
 
             // Options
             if (app.ambientOcclusion) {
                 ImGui::Checkbox("Show embree result", &app.showOverlay);
             }
-            if (canBake) {
-                static const int kFirstOption = std::log2(512);
-                int bakeOption = std::log2(app.bakeResolution) - kFirstOption;
-                ImGui::Combo("Bake Resolution", &bakeOption,
-                        "512 x 512\0"
-                        "1024 x 1024\0"
-                        "2048 x 2048\0");
-                app.bakeResolution = 1 << (bakeOption + kFirstOption);
-            }
+            static const int kFirstOption = std::log2(512);
+            int bakeOption = std::log2(app.bakeResolution) - kFirstOption;
+            ImGui::Combo("Bake Resolution", &bakeOption,
+                    "512 x 512\0"
+                    "1024 x 1024\0"
+                    "2048 x 2048\0");
+            app.bakeResolution = 1 << (bakeOption + kFirstOption);
 
+            // Progress indicators and modals.
             if (app.statusText) {
-                // Apply a poor man's animation to the ellipsis to indicate that work is being done.
                 static const char* suffixes[] = { "...", "......", "........." };
                 static float suffixAnim = 0;
                 suffixAnim += 0.05f;
@@ -701,7 +675,7 @@ int main(int argc, char** argv) {
                 ImGui::RadioButton("Preserve materials", (int*) &app.exportOption, 2);
                 if (ImGui::Button("OK", ImVec2(120,0))) {
                     ImGui::CloseCurrentPopup();
-                    exportAsset(app);
+                    actionExport(app);
                 }
                 ImGui::EndPopup();
             }
