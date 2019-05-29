@@ -71,9 +71,9 @@ enum AppState {
 
 enum class ResultsVisualization : int {
     MESH_ORIGINAL,
-    MESH_REPLACED_AO,
-    MESH_ONLY_AO,
-    MESH_TEXCOORDS,
+    MESH_MODIFIED,
+    MESH_PREVIEW_AO,
+    MESH_PREVIEW_UV,
     IMAGE_OCCLUSION,
     IMAGE_BENT_NORMALS
 };
@@ -89,18 +89,8 @@ struct App {
     Camera* camera;
     SimpleViewer* viewer;
     Config config;
-    AssetLoader* loader;
-    FilamentAsset* asset = nullptr;
     NameComponentManager* names;
     MaterialProvider* materials;
-    bool actualSize = false;
-    AppState state = EMPTY;
-    utils::Path filename;
-    image::LinearImage ambientOcclusion;
-    image::LinearImage bentNormals;
-    image::LinearImage meshNormals;
-    image::LinearImage meshPositions;
-    ResultsVisualization resultsVisualization = ResultsVisualization::MESH_ORIGINAL;
     View* overlayView = nullptr;
     Scene* overlayScene = nullptr;
     VertexBuffer* overlayVb = nullptr;
@@ -108,11 +98,29 @@ struct App {
     Texture* overlayTexture = nullptr;
     MaterialInstance* overlayMaterial = nullptr;
     utils::Entity overlayEntity;
+
+    AssetLoader* loader = nullptr;
+    gltfio::AssetPipeline* pipeline = nullptr;
+
+    FilamentAsset* viewerAsset = nullptr;
+    gltfio::AssetPipeline::AssetHandle currentAsset = nullptr;
+    gltfio::AssetPipeline::AssetHandle modifiedAsset = nullptr;
+    gltfio::AssetPipeline::AssetHandle previewAoAsset = nullptr;
+    gltfio::AssetPipeline::AssetHandle previewUvAsset = nullptr;
+
+    image::LinearImage ambientOcclusion;
+    image::LinearImage bentNormals;
+    image::LinearImage meshNormals;
+    image::LinearImage meshPositions;
+
+    bool actualSize = false;
+    AppState state = EMPTY;
+    utils::Path filename;
+    ResultsVisualization resultsVisualization = ResultsVisualization::MESH_ORIGINAL;
     AppState pushedState;
     uint32_t bakeResolution = 1024;
     int samplesPerPixel = 256;
     ExportOption exportOption = PRESERVE_MATERIALS;
-    gltfio::AssetPipeline* pipeline = nullptr;
 
     // Secondary threads might write to the following fields.
     std::shared_ptr<std::string> statusText;
@@ -308,8 +316,9 @@ static void createOverlay(App& app) {
 }
 
 static void loadAsset(App& app, gltfio::AssetPipeline::AssetHandle handle) {
-    app.asset = app.loader->createAssetFromHandle(handle);
-    assert(app.asset);
+
+    app.currentAsset = handle;
+    app.viewerAsset = app.loader->createAssetFromHandle(handle);
 
     // Load external textures and buffers.
     gltfio::ResourceLoader({
@@ -317,14 +326,14 @@ static void loadAsset(App& app, gltfio::AssetPipeline::AssetHandle handle) {
         .gltfPath = app.filename.getAbsolutePath(),
         .normalizeSkinningWeights = true,
         .recomputeBoundingBoxes = false
-    }).loadResources(app.asset);
+    }).loadResources(app.viewerAsset);
 
     // Load animation data then free the source hierarchy.
-    app.asset->getAnimator();
-    app.state = AssetPipeline::isParameterized(app.asset->getSourceAsset()) ? PARAMETRIZED : LOADED;
+    app.viewerAsset->getAnimator();
+    app.state = AssetPipeline::isParameterized(handle) ? PARAMETRIZED : LOADED;
 
-    // Destroy the old asset and add the renderables to the scene.
-    app.viewer->setAsset(app.asset, app.names, !app.actualSize);
+    // Destroy the old currentAsset and add the renderables to the scene.
+    app.viewer->setAsset(app.viewerAsset, app.names, !app.actualSize);
 }
 
 static void loadAsset(App& app) {
@@ -367,7 +376,7 @@ static void loadAsset(App& app) {
 static void actionTestRender(App& app) {
     app.pushedState = app.state;
     app.state = RENDERING;
-    gltfio::AssetPipeline::AssetHandle asset = app.asset->getSourceAsset();
+    gltfio::AssetPipeline::AssetHandle currentAsset = app.currentAsset;
 
     // Allocate the render target for the path tracer as well as a GPU texture to display it.
     auto viewportSize = ImGui::GetIO().DisplaySize;
@@ -382,7 +391,7 @@ static void actionTestRender(App& app) {
     // model into a unit cube (see the -s option), so here we do little trick by temporarily
     // transforming the Filament camera before grabbing its lookAt vectors.
     auto& tcm = app.engine->getTransformManager();
-    auto root = tcm.getInstance(app.asset->getRoot());
+    auto root = tcm.getInstance(app.viewerAsset->getRoot());
     auto cam = tcm.getInstance(app.camera->getEntity());
     filament::math::mat4f prev = tcm.getTransform(root);
     tcm.setTransform(root, inverse(prev));
@@ -409,7 +418,7 @@ static void actionTestRender(App& app) {
         app->requestStatePop = true;
         app->requestOverlayUpdate = true;
     };
-    app.pipeline->renderAmbientOcclusion(asset, app.ambientOcclusion, camera, onRenderTile,
+    app.pipeline->renderAmbientOcclusion(currentAsset, app.ambientOcclusion, camera, onRenderTile,
             onRenderDone, &app);
 }
 
@@ -435,7 +444,6 @@ static void actionBakeAo(App& app) {
 
     auto doRender = [&app] {
         app.state = BAKING;
-        gltfio::AssetPipeline::AssetHandle asset = app.asset->getSourceAsset();
 
         // Allocate the render target for the path tracer as well as a GPU texture to display it.
         const uint32_t res = app.bakeResolution;
@@ -473,19 +481,31 @@ static void actionBakeAo(App& app) {
         image::LinearImage outputs[] = {
             app.ambientOcclusion, app.bentNormals, app.meshNormals, app.meshPositions
         };
-        app.pipeline->bakeAllOutputs(asset, outputs, onRenderTile, onRenderDone, &app);
+        app.pipeline->bakeAllOutputs(app.currentAsset, outputs, onRenderTile, onRenderDone, &app);
+
+        const utils::Path folder = app.filename.getAbsolutePath().getParent();
+        const utils::Path binPath = folder + "baked.bin";
+        const utils::Path outPath = folder + "baked.gltf";
+        const utils::Path texPath = folder + "baked.png";
+
+        generateUvVisualization(folder + "uvs.png");
+
+        std::ofstream out(texPath.c_str(), std::ios::binary | std::ios::trunc);
+        ImageEncoder::encode(out, ImageEncoder::Format::PNG_LINEAR, app.ambientOcclusion, "",
+                texPath.c_str());
+
+        app.previewAoAsset = app.pipeline->generatePreview(app.currentAsset, "baked.png");
+        app.previewUvAsset = app.pipeline->generatePreview(app.currentAsset, "uvs.png");
     };
 
     auto parameterizeJob = [&app, doRender] {
-        gltfio::AssetPipeline::AssetHandle asset = app.asset->getSourceAsset();
-
         auto pipeline = new gltfio::AssetPipeline();
 
         app.statusText = std::make_shared<std::string>("Parameterizing");
-        asset = pipeline->parameterize(asset);
+        auto parameterized = pipeline->parameterize(app.currentAsset);
         app.statusText.reset();
 
-        if (!asset) {
+        if (!parameterized) {
             app.messageBoxText = std::make_shared<std::string>(
                     "Unable to parameterize mesh, check terminal output for details.");
             app.pushedState = LOADED;
@@ -494,7 +514,7 @@ static void actionBakeAo(App& app) {
             return;
         }
 
-        loadAsset(app, asset);
+        loadAsset(app, parameterized);
 
         app.pushedState = PARAMETRIZED;
         app.requestStatePop = true;
@@ -505,7 +525,7 @@ static void actionBakeAo(App& app) {
         doRender();
     };
 
-    if (AssetPipeline::isParameterized(app.asset->getSourceAsset())) {
+    if (AssetPipeline::isParameterized(app.currentAsset)) {
         puts("Already parameterized.");
         doRender();
     } else {
@@ -518,40 +538,22 @@ static void actionBakeAo(App& app) {
 }
 
 static void actionExport(App& app) {
-    using namespace image;
-
     const utils::Path folder = app.filename.getAbsolutePath().getParent();
     const utils::Path binPath = folder + "baked.bin";
     const utils::Path outPath = folder + "baked.gltf";
     const utils::Path texPath = folder + "baked.png";
-
-    std::ofstream out(texPath.c_str(), std::ios::binary | std::ios::trunc);
-    ImageEncoder::encode(out, ImageEncoder::Format::PNG_LINEAR, app.ambientOcclusion, "",
-            texPath.c_str());
-
-    gltfio::AssetPipeline::AssetHandle asset = app.asset->getSourceAsset();
-    gltfio::AssetPipeline pipeline;
     switch (app.exportOption) {
         case VISUALIZE_AO:
-            asset = pipeline.generatePreview(asset, "baked.png");
-            app.resultsVisualization = ResultsVisualization::MESH_ONLY_AO;
+            app.pipeline->save(app.previewAoAsset, outPath, binPath);
             break;
         case VISUALIZE_UV:
-            generateUvVisualization(folder + "uvs.png");
-            asset = pipeline.generatePreview(asset, "uvs.png");
-            app.resultsVisualization = ResultsVisualization::MESH_TEXCOORDS;
+            app.pipeline->save(app.previewUvAsset, outPath, binPath);
             break;
         case PRESERVE_MATERIALS:
-            asset = pipeline.replaceOcclusion(asset, "baked.png");
-            app.resultsVisualization = ResultsVisualization::MESH_REPLACED_AO;
+            app.pipeline->save(app.modifiedAsset, outPath, binPath);
             break;
     }
-    pipeline.save(asset, outPath, binPath);
-
     std::cout << "Generated " << outPath << ", " << binPath << ", and " << texPath << std::endl;
-    app.filename = outPath;
-    loadAsset(app);
-
     app.state = EXPORTED;
 }
 
@@ -685,17 +687,18 @@ int main(int argc, char** argv) {
             }
 
             // Results
-            if (app.ambientOcclusion && ImGui::CollapsingHeader("Results")) {
+            if (app.ambientOcclusion && ImGui::CollapsingHeader("Results",
+                    ImGuiTreeNodeFlags_DefaultOpen)) {
                 int* ptr = (int*) &app.resultsVisualization;
                 ImGui::Indent();
                 ImGui::RadioButton("3D model with original materials", ptr,
                         (int) ResultsVisualization::MESH_ORIGINAL);
                 ImGui::RadioButton("3D model with original materials + new occlusion", ptr,
-                        (int) ResultsVisualization::MESH_REPLACED_AO);
+                        (int) ResultsVisualization::MESH_MODIFIED);
                 ImGui::RadioButton("3D model with new occlusion only", ptr,
-                        (int) ResultsVisualization::MESH_ONLY_AO);
+                        (int) ResultsVisualization::MESH_PREVIEW_AO);
                 ImGui::RadioButton("3D model with UV visualization", ptr,
-                        (int) ResultsVisualization::MESH_TEXCOORDS);
+                        (int) ResultsVisualization::MESH_PREVIEW_UV);
                 ImGui::RadioButton("2D texture view (occlusion)", ptr,
                         (int) ResultsVisualization::IMAGE_OCCLUSION);
                 ImGui::RadioButton("2D texture view (bent normals)", ptr,
@@ -752,7 +755,6 @@ int main(int argc, char** argv) {
     auto cleanup = [&app](Engine* engine, View*, Scene*) {
         Fence::waitAndDestroy(engine->createFence());
         delete app.viewer;
-        app.loader->destroyAsset(app.asset);
         app.materials->destroyMaterials();
         delete app.materials;
         AssetLoader::destroy(&app.loader);
@@ -798,7 +800,6 @@ int main(int argc, char** argv) {
 
     filamentApp.setDropHandler([&] (std::string path) {
         app.viewer->removeAsset();
-        app.loader->destroyAsset(app.asset);
         app.filename = path;
         loadAsset(app);
         saveIniFile(app);
