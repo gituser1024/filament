@@ -54,6 +54,9 @@ using namespace filament;
 using namespace gltfio;
 using namespace utils;
 
+static inline ImVec2& operator+=(ImVec2& lhs, const ImVec2& rhs)                { lhs.x += rhs.x; lhs.y += rhs.y; return lhs; }
+static inline ImVec2 operator+(const ImVec2& lhs, const ImVec2& rhs)            { return ImVec2(lhs.x+rhs.x, lhs.y+rhs.y); }
+
 enum AppState {
     EMPTY,
     LOADED,
@@ -588,46 +591,73 @@ int main(int argc, char** argv) {
         createOverlay(app);
 
         app.viewer->setUiCallback([&app, scene] () {
-            const ImVec4 disabled = ImGui::GetStyle().Colors[ImGuiCol_TextDisabled];
-            const ImVec4 hovered = ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered];
-            const ImVec4 enabled = ImVec4(0.5, 0.5, 0.0, 1.0);
+            const ImU32 disabled = ImColor(ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+            const ImU32 hovered = ImColor(ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);
+            const ImU32 enabled = ImColor(0.5f, 0.5f, 0.0f);
+            const ImVec2 buttonSize(100, 50);
+            const float buttonPositions[] = { 0, buttonSize.x + 2, buttonSize.x * 2 + 3 };
+            ImVec2 pos;
+            ImU32 color;
 
-            // Action buttons
-            ImGui::GetStyle().FrameRounding = 5;
+            // Begin action buttons
+            ImGui::GetStyle().ItemSpacing.x = 1;
+            ImGui::GetStyle().FrameRounding = 10;
             ImGui::PushStyleColor(ImGuiCol_Button, enabled);
             ImGui::Spacing();
             ImGui::Spacing();
             ImGui::BeginGroup();
-            if (ImGui::Button("Test Render", ImVec2(100, 50))) {
+
+            // TEST RENDER
+            ImGui::SameLine(buttonPositions[0]);
+            pos = ImGui::GetCursorScreenPos();
+            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hovered : enabled;
+            ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color,
+                    ImGui::GetStyle().FrameRounding, ImDrawCornerFlags_Left);
+            if (ImGui::Button("Test Render", buttonSize)) {
                 actionTestRender(app);
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Renders the asset from the current camera using a pathtracer.");
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Bake AO", ImVec2(100, 50))) {
+
+            // BAKE
+            ImGui::SameLine(buttonPositions[1]);
+            pos = ImGui::GetCursorScreenPos();
+            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hovered : enabled;
+            ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color);
+            if (ImGui::Button("Bake AO", buttonSize)) {
                 actionBakeAo(app);
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Generates a new set of UVs and invokes a pathtracer.");
             }
+
+            // EXPORT
+            ImGui::SameLine(buttonPositions[2]);
+            pos = ImGui::GetCursorScreenPos();
+            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hovered : enabled;
             const bool canExport = app.state == BAKED;
-            ImGui::PushStyleColor(ImGuiCol_Button, canExport ? enabled : disabled);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, canExport ? hovered : disabled);
-            ImGui::SameLine();
-            if (ImGui::Button("Export...", ImVec2(100, 50)) && canExport) {
+            color = canExport ? color : disabled;
+            ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color,
+                    ImGui::GetStyle().FrameRounding, ImDrawCornerFlags_Right);
+            ImGui::PushStyleColor(ImGuiCol_Button, color);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, color);
+            if (ImGui::Button("Export...", buttonSize) && canExport) {
                 ImGui::OpenPopup("Export options");
             }
+            ImGui::PopStyleColor();
+            ImGui::PopStyleColor();
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Saves the baked result to disk.");
             }
-            ImGui::PopStyleColor();
-            ImGui::PopStyleColor();
+
+            // End action buttons
             ImGui::EndGroup();
             ImGui::Spacing();
             ImGui::Spacing();
             ImGui::PopStyleColor();
             ImGui::GetStyle().FrameRounding = 20;
+            ImGui::GetStyle().ItemSpacing.x = 8;
 
             // Options
             if (app.ambientOcclusion) {
