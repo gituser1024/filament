@@ -88,7 +88,6 @@ struct App {
     image::LinearImage meshNormals;
     image::LinearImage meshPositions;
     bool showOverlay = false;
-    bool enablePrepScale = true;
     View* overlayView = nullptr;
     Scene* overlayScene = nullptr;
     VertexBuffer* overlayVb = nullptr;
@@ -99,8 +98,7 @@ struct App {
     AppState pushedState;
     uint32_t bakeResolution = 1024;
     ExportOption exportOption = PRESERVE_MATERIALS;
-    gltfio::AssetPipeline* flattener = nullptr;
-    gltfio::AssetPipeline* baker = nullptr;
+    gltfio::AssetPipeline* pipeline = nullptr;
 
     // Secondary threads might write to the following fields.
     std::shared_ptr<std::string> statusText;
@@ -295,32 +293,7 @@ static void createOverlay(App& app) {
     app.overlayMaterial = matInstance;
 }
 
-static void loadAsset(App& app) {
-    std::cout << "Loading " << app.filename << "..." << std::endl;
-
-    if (app.filename.getExtension() == "glb") {
-        std::cerr << "GLB files are not yet supported." << std::endl;
-        exit(1);
-    }
-
-    // Reset the pipeline to free memory.
-    delete app.flattener;
-    app.flattener = new gltfio::AssetPipeline();
-
-    gltfio::AssetPipeline::AssetHandle handle = app.flattener->load(app.filename);
-    if (!handle) {
-        puts("Unable to load model");
-        exit(1);
-    }
-
-    if (!gltfio::AssetPipeline::isFlattened(handle)) {
-        handle = app.flattener->flatten(handle);
-        if (!handle) {
-            puts("Unable to flatten model");
-            exit(1);
-        }
-    }
-
+static void loadAsset(App& app, gltfio::AssetPipeline::AssetHandle handle) {
     app.asset = app.loader->createAssetFromHandle(handle);
     assert(app.asset);
 
@@ -338,51 +311,81 @@ static void loadAsset(App& app) {
 
     // Destroy the old asset and add the renderables to the scene.
     app.viewer->setAsset(app.asset, app.names, !app.actualSize);
+}
+
+static void loadAsset(App& app) {
+    std::cout << "Loading " << app.filename << "..." << std::endl;
+
+    if (app.filename.getExtension() == "glb") {
+        std::cerr << "GLB files are not yet supported." << std::endl;
+        exit(1);
+    }
+
+    // Reset the pipeline to free memory.
+    auto pipeline = new gltfio::AssetPipeline();
+
+    gltfio::AssetPipeline::AssetHandle handle = pipeline->load(app.filename);
+    if (!handle) {
+        delete pipeline;
+        puts("Unable to load model");
+        exit(1);
+    }
+
+    if (!gltfio::AssetPipeline::isFlattened(handle)) {
+        handle = pipeline->flatten(handle);
+        if (!handle) {
+            delete pipeline;
+            puts("Unable to flatten model");
+            exit(1);
+        }
+    }
+
+    delete app.pipeline;
+    app.pipeline = pipeline;
 
     app.viewer->setIndirectLight(FilamentApp::get().getIBL()->getIndirectLight());
+
+    loadAsset(app, handle);
 
     FilamentApp::get().setWindowTitle(app.filename.getName().c_str());
 }
 
 static void parameterizeAsset(App& app) {
+
+    if (AssetPipeline::isParameterized(app.asset->getSourceAsset())) {
+        puts("Already parameterized.");
+        return;
+    }
+
     app.state = PARAMETRIZING;
 
     utils::JobSystem* js = utils::JobSystem::getJobSystem();
     utils::JobSystem::Job* parent = js->createJob();
     utils::JobSystem::Job* prep = utils::jobs::createJob(*js, parent, [&app] {
         gltfio::AssetPipeline::AssetHandle asset = app.asset->getSourceAsset();
-        uint32_t flags = gltfio::AssetPipeline::FILTER_TRIANGLES;
-        if (app.enablePrepScale) {
-            flags |= gltfio::AssetPipeline::SCALE_TO_UNIT;
-        }
-        gltfio::AssetPipeline pipeline;
 
-        {
-            app.statusText = std::make_shared<std::string>("Parameterizing");
-            asset = pipeline.parameterize(asset);
-            app.statusText.reset();
-        }
+        auto pipeline = new gltfio::AssetPipeline();
+
+        app.statusText = std::make_shared<std::string>("Parameterizing");
+        asset = pipeline->parameterize(asset);
+        app.statusText.reset();
 
         if (!asset) {
             app.messageBoxText = std::make_shared<std::string>(
                     "Unable to parameterize mesh, check terminal output for details.");
             app.pushedState = LOADED;
             app.requestStatePop = true;
+            delete pipeline;
             return;
         }
 
-        const utils::Path folder = app.filename.getAbsolutePath().getParent();
-        const utils::Path binPath = folder + "prepped.bin";
-        const utils::Path outPath = folder + "prepped.gltf";
-
-        pipeline.save(asset, outPath, binPath);
-        std::cout << "Generated " << outPath << " and " << binPath << std::endl;
-
-        app.filename = outPath;
-        loadAsset(app);
+        loadAsset(app, asset);
 
         app.pushedState = PARAMETRIZED;
         app.requestStatePop = true;
+
+        delete app.pipeline;
+        app.pipeline = pipeline;
     });
     js->run(prep);
 }
@@ -420,8 +423,6 @@ static void renderAsset(App& app) {
     tcm.setParent(cam, {});
     tcm.setTransform(root, prev);
 
-    app.baker = new gltfio::AssetPipeline();
-
     // Finally, set up some callbacks and invoke the path tracer.
 
     using filament::math::ushort2;
@@ -433,10 +434,8 @@ static void renderAsset(App& app) {
         App* app = (App*) userData;
         app->requestStatePop = true;
         app->requestOverlayUpdate = true;
-        delete app->baker;
-        app->baker = nullptr;
     };
-    app.baker->renderAmbientOcclusion(asset, app.ambientOcclusion, camera, onRenderTile,
+    app.pipeline->renderAmbientOcclusion(asset, app.ambientOcclusion, camera, onRenderTile,
             onRenderDone, &app);
 }
 
@@ -468,8 +467,6 @@ static void bakeAsset(App& app) {
     app.ambientOcclusion = image::LinearImage(res, res, 1);
     createOverlayTexture(app);
 
-    app.baker = new gltfio::AssetPipeline();
-
     using filament::math::ushort2;
     auto onRenderTile = [](ushort2, ushort2, void* userData) {
         App* app = (App*) userData;
@@ -500,19 +497,16 @@ static void bakeAsset(App& app) {
         img = image::verticalFlip(image::vectorsToColors(app->meshPositions));
         ImageEncoder::encode(mp, fmt, img, "", "meshPositions.png");
 
-        delete app->pipeline;
         app->state = BAKED;
     };
     app.pipeline->bakeAllOutputs(asset, outputs, onRenderTile, onRenderDone, &app);
 #else
     auto onRenderDone = [](void* userData) {
         App* app = (App*) userData;
-        delete app->baker;
-        app->baker = nullptr;
         app->requestOverlayUpdate = true;
         app->state = BAKED;
     };
-    app.baker->bakeAmbientOcclusion(asset, app.ambientOcclusion, onRenderTile, onRenderDone, &app);
+    app.pipeline->bakeAmbientOcclusion(asset, app.ambientOcclusion, onRenderTile, onRenderDone, &app);
 #endif
 }
 
@@ -663,7 +657,6 @@ int main(int argc, char** argv) {
             if (app.ambientOcclusion) {
                 ImGui::Checkbox("Show embree result", &app.showOverlay);
             }
-            ImGui::Checkbox("Auto-scale before parameterization", &app.enablePrepScale);
             if (canBake) {
                 static const int kFirstOption = std::log2(512);
                 int bakeOption = std::log2(app.bakeResolution) - kFirstOption;
