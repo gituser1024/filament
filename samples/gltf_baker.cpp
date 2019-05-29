@@ -54,8 +54,9 @@ using namespace filament;
 using namespace gltfio;
 using namespace utils;
 
-static inline ImVec2& operator+=(ImVec2& lhs, const ImVec2& rhs)                { lhs.x += rhs.x; lhs.y += rhs.y; return lhs; }
-static inline ImVec2 operator+(const ImVec2& lhs, const ImVec2& rhs)            { return ImVec2(lhs.x+rhs.x, lhs.y+rhs.y); }
+static inline ImVec2 operator+(const ImVec2& lhs, const ImVec2& rhs) {
+    return { lhs.x+rhs.x, lhs.y+rhs.y };
+}
 
 enum AppState {
     EMPTY,
@@ -66,6 +67,15 @@ enum AppState {
     BAKING,
     BAKED,
     EXPORTED,
+};
+
+enum class ResultsVisualization : int {
+    MESH_ORIGINAL,
+    MESH_REPLACED_AO,
+    MESH_ONLY_AO,
+    MESH_TEXCOORDS,
+    IMAGE_OCCLUSION,
+    IMAGE_BENT_NORMALS
 };
 
 enum ExportOption : int {
@@ -90,7 +100,7 @@ struct App {
     image::LinearImage bentNormals;
     image::LinearImage meshNormals;
     image::LinearImage meshPositions;
-    bool showOverlay = false;
+    ResultsVisualization resultsVisualization = ResultsVisualization::MESH_ORIGINAL;
     View* overlayView = nullptr;
     Scene* overlayScene = nullptr;
     VertexBuffer* overlayVb = nullptr;
@@ -100,6 +110,7 @@ struct App {
     utils::Entity overlayEntity;
     AppState pushedState;
     uint32_t bakeResolution = 1024;
+    int samplesPerPixel = 256;
     ExportOption exportOption = PRESERVE_MATERIALS;
     gltfio::AssetPipeline* pipeline = nullptr;
 
@@ -362,7 +373,7 @@ static void actionTestRender(App& app) {
     auto viewportSize = ImGui::GetIO().DisplaySize;
     viewportSize.x -= app.viewer->getSidebarWidth();
     app.ambientOcclusion = image::LinearImage(viewportSize.x, viewportSize.y, 1);
-    app.showOverlay = true;
+    app.resultsVisualization = ResultsVisualization::IMAGE_OCCLUSION;
     createOverlayTexture(app);
 
     // Compute the camera paramaeters for the path tracer.
@@ -428,7 +439,7 @@ static void actionBakeAo(App& app) {
 
         // Allocate the render target for the path tracer as well as a GPU texture to display it.
         const uint32_t res = app.bakeResolution;
-        app.showOverlay = true;
+        app.resultsVisualization = ResultsVisualization::IMAGE_OCCLUSION;
         app.ambientOcclusion = image::LinearImage(res, res, 1);
         app.bentNormals = image::LinearImage(res, res, 3);
         app.meshNormals = image::LinearImage(res, res, 3);
@@ -523,13 +534,16 @@ static void actionExport(App& app) {
     switch (app.exportOption) {
         case VISUALIZE_AO:
             asset = pipeline.generatePreview(asset, "baked.png");
+            app.resultsVisualization = ResultsVisualization::MESH_ONLY_AO;
             break;
         case VISUALIZE_UV:
             generateUvVisualization(folder + "uvs.png");
             asset = pipeline.generatePreview(asset, "uvs.png");
+            app.resultsVisualization = ResultsVisualization::MESH_TEXCOORDS;
             break;
         case PRESERVE_MATERIALS:
             asset = pipeline.replaceOcclusion(asset, "baked.png");
+            app.resultsVisualization = ResultsVisualization::MESH_REPLACED_AO;
             break;
     }
     pipeline.save(asset, outPath, binPath);
@@ -539,7 +553,6 @@ static void actionExport(App& app) {
     loadAsset(app);
 
     app.state = EXPORTED;
-    app.showOverlay = false;
 }
 
 int main(int argc, char** argv) {
@@ -659,19 +672,7 @@ int main(int argc, char** argv) {
             ImGui::GetStyle().FrameRounding = 20;
             ImGui::GetStyle().ItemSpacing.x = 8;
 
-            // Options
-            if (app.ambientOcclusion) {
-                ImGui::Checkbox("Show embree result", &app.showOverlay);
-            }
-            static const int kFirstOption = std::log2(512);
-            int bakeOption = std::log2(app.bakeResolution) - kFirstOption;
-            ImGui::Combo("Bake Resolution", &bakeOption,
-                    "512 x 512\0"
-                    "1024 x 1024\0"
-                    "2048 x 2048\0");
-            app.bakeResolution = 1 << (bakeOption + kFirstOption);
-
-            // Progress indicators and modals.
+            // Progress indicators
             if (app.statusText) {
                 static const char* suffixes[] = { "...", "......", "........." };
                 static float suffixAnim = 0;
@@ -683,6 +684,38 @@ int main(int argc, char** argv) {
                 ImGui::PopStyleVar();
             }
 
+            // Results
+            if (app.ambientOcclusion && ImGui::CollapsingHeader("Results")) {
+                int* ptr = (int*) &app.resultsVisualization;
+                ImGui::Indent();
+                ImGui::RadioButton("3D model with original materials", ptr,
+                        (int) ResultsVisualization::MESH_ORIGINAL);
+                ImGui::RadioButton("3D model with original materials + new occlusion", ptr,
+                        (int) ResultsVisualization::MESH_REPLACED_AO);
+                ImGui::RadioButton("3D model with new occlusion only", ptr,
+                        (int) ResultsVisualization::MESH_ONLY_AO);
+                ImGui::RadioButton("3D model with UV visualization", ptr,
+                        (int) ResultsVisualization::MESH_TEXCOORDS);
+                ImGui::RadioButton("2D texture view (occlusion)", ptr,
+                        (int) ResultsVisualization::IMAGE_OCCLUSION);
+                ImGui::RadioButton("2D texture view (bent normals)", ptr,
+                        (int) ResultsVisualization::IMAGE_BENT_NORMALS);
+                ImGui::Unindent();
+            }
+
+            // Options
+            if (ImGui::CollapsingHeader("Bake Options")) {
+                ImGui::InputInt("Samples per pixel", &app.samplesPerPixel);
+                static const int kFirstOption = std::log2(512);
+                int bakeOption = std::log2(app.bakeResolution) - kFirstOption;
+                ImGui::Combo("Texture size", &bakeOption,
+                        "512 x 512\0"
+                        "1024 x 1024\0"
+                        "2048 x 2048\0");
+                app.bakeResolution = 1 << (bakeOption + kFirstOption);
+            }
+
+            // Modals
             if (app.messageBoxText) {
                 ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {10, 10} );
                 ImGui::OpenPopup("MessageBox");
@@ -731,13 +764,15 @@ int main(int argc, char** argv) {
         if (app.state != EMPTY) {
             app.viewer->applyAnimation(0.0);
         }
-        if (!app.overlayScene && app.showOverlay) {
+        bool showOverlay = app.resultsVisualization == ResultsVisualization::IMAGE_OCCLUSION ||
+                app.resultsVisualization == ResultsVisualization::IMAGE_BENT_NORMALS;
+        if (!app.overlayScene && showOverlay) {
             app.overlayView = FilamentApp::get().getGuiView();
             app.overlayScene = app.overlayView->getScene();
         }
         if (app.overlayScene) {
             app.overlayScene->remove(app.overlayEntity);
-            if (app.showOverlay) {
+            if (showOverlay) {
                 updateOverlay(app);
                 app.overlayScene->addEntity(app.overlayEntity);
             }

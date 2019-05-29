@@ -148,6 +148,13 @@ public:
             image::LinearImage targets[filament::rays::OUTPUTPLANE_COUNT],
             RenderTileCallback progress, RenderDoneCallback done, void* userData);
 
+    /**
+     * Sets the number of occlusion rays emitted for each pixel in the target image.
+     *
+     * This has an effect on subsequent calls to bake*() and render*().
+     */
+    void setSamplesPerPixel(size_t spp);
+
     static bool isFlattened(AssetHandle source);
     static bool isParameterized(AssetHandle source);
 

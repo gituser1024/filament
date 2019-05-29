@@ -114,6 +114,8 @@ public:
             filament::rays::TileCallback onTile, filament::rays::DoneCallback onDone,
             void* userData);
 
+    void setSamplesPerPixel(size_t spp) { mSamplesPerPixel = spp; }
+
     ~Pipeline();
 
 private:
@@ -130,6 +132,7 @@ private:
 
     uint32_t mFlattenFlags;
     vector<cgltf_data*> mSourceAssets;
+    size_t mSamplesPerPixel = 256;
 
     struct {
         ArrayHolder<cgltf_data> resultAssets;
@@ -747,6 +750,7 @@ void Pipeline::bakeAmbientOcclusion(const cgltf_data* sourceAsset, image::Linear
         .outputPlane(filament::rays::AMBIENT_OCCLUSION, target)
         .uvCamera()
         .denoise()
+        .samplesPerPixel(mSamplesPerPixel)
         .tileCallback(onTile, userData)
         .doneCallback(onDone, userData);
 
@@ -766,6 +770,7 @@ void Pipeline::renderAmbientOcclusion(const cgltf_data* sourceAsset, image::Line
         .outputPlane(filament::rays::AMBIENT_OCCLUSION, target)
         .filmCamera(camera)
         .denoise()
+        .samplesPerPixel(mSamplesPerPixel)
         .tileCallback(onTile, userData)
         .doneCallback(onDone, userData);
 
@@ -788,6 +793,8 @@ void Pipeline::bakeAllOutputs(const cgltf_data* sourceAsset,
         .outputPlane(MESH_NORMALS, targets[(int) MESH_NORMALS])
         .outputPlane(MESH_POSITIONS, targets[(int) MESH_POSITIONS])
         .uvCamera()
+        .denoise()
+        .samplesPerPixel(mSamplesPerPixel)
         .tileCallback(onTile, userData)
         .doneCallback(onDone, userData);
 
@@ -1696,6 +1703,11 @@ void AssetPipeline::bakeAllOutputs(AssetHandle source,
         return;
     }
     impl->bakeAllOutputs(sourceAsset, targets, onTile, onDone, userData);
+}
+
+void AssetPipeline::setSamplesPerPixel(size_t spp) {
+    Pipeline* impl = (Pipeline*) mImpl;
+    impl->setSamplesPerPixel(spp);
 }
 
 bool AssetPipeline::isFlattened(AssetHandle source) {
