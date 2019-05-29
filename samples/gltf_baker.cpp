@@ -108,6 +108,8 @@ struct App {
     gltfio::AssetPipeline::AssetHandle previewAoAsset = nullptr;
     gltfio::AssetPipeline::AssetHandle previewUvAsset = nullptr;
 
+    bool hasTestRender = false;
+
     image::LinearImage ambientOcclusion;
     image::LinearImage bentNormals;
     image::LinearImage meshNormals;
@@ -277,25 +279,27 @@ static void createOverlayTexture(App& app) {
     using MinFilter = TextureSampler::MinFilter;
     using MagFilter = TextureSampler::MagFilter;
 
-    int w = app.ambientOcclusion.getWidth();
-    int h = app.ambientOcclusion.getHeight();
-    void* data = app.ambientOcclusion.getPixelRef();
-    Texture::PixelBufferDescriptor buffer(data, size_t(w * h * 4),
-            Texture::Format::R, Texture::Type::FLOAT);
+    image::LinearImage image = app.resultsVisualization == ResultsVisualization::IMAGE_OCCLUSION ?
+            app.ambientOcclusion : app.bentNormals;
+    uint32_t width = image.getWidth();
+    uint32_t height = image.getHeight();
+    int channels = image.getChannels();
+
     auto tex = Texture::Builder()
-            .width(uint32_t(w))
-            .height(uint32_t(h))
+            .width(width)
+            .height(height)
             .levels(1)
             .sampler(Texture::Sampler::SAMPLER_2D)
-            .format(Texture::InternalFormat::R8)
+            .format(channels == 1 ? Texture::InternalFormat::R8 : Texture::InternalFormat::RGB8)
             .build(engine);
-    tex->setImage(engine, 0, std::move(buffer));
 
     TextureSampler sampler(MinFilter::LINEAR, MagFilter::LINEAR);
     app.overlayMaterial->setParameter("luma", tex, sampler);
 
     engine.destroy(app.overlayTexture);
     app.overlayTexture = tex;
+
+    updateOverlayTexture(app);
 }
 
 static void createOverlay(App& app) {
@@ -387,6 +391,8 @@ static void loadAsset(App& app) {
 static void actionTestRender(App& app) {
     app.pushedState = app.state;
     app.state = RENDERING;
+    app.hasTestRender = true;
+
     gltfio::AssetPipeline::AssetHandle currentAsset = app.currentAsset;
 
     // Allocate the render target for the path tracer as well as a GPU texture to display it.
@@ -452,6 +458,8 @@ static void generateUvVisualization(const utils::Path& pngOutputPath) {
 static void actionBakeAo(App& app) {
     using namespace image;
     using filament::math::ushort2;
+
+    app.hasTestRender = false;
 
     auto doRender = [&app] {
         app.state = BAKING;
@@ -698,27 +706,33 @@ int main(int argc, char** argv) {
             }
 
             // Results
+            auto addOption = [&app](const char* msg, char num, ResultsVisualization e) {
+                ImGuiIO& io = ImGui::GetIO();
+                int* ptr = (int*) &app.resultsVisualization;
+                if (io.InputCharacters[0] == num) { app.resultsVisualization = e; }
+                ImGui::RadioButton(msg, ptr, num - '1');
+                ImGui::SameLine();
+                ImGui::TextColored({1, 1, 0,1 }, "%c", num);
+            };
             if (app.ambientOcclusion && ImGui::CollapsingHeader("Results",
                     ImGuiTreeNodeFlags_DefaultOpen)) {
-                const ResultsVisualization previousVisualization = app.resultsVisualization;
-                int* ptr = (int*) &app.resultsVisualization;
                 ImGui::Indent();
-                ImGui::RadioButton("3D model with original materials", ptr,
-                        (int) ResultsVisualization::MESH_ORIGINAL);
-                ImGui::RadioButton("3D model with original materials + new occlusion", ptr,
-                        (int) ResultsVisualization::MESH_MODIFIED);
-                ImGui::RadioButton("3D model with new occlusion only", ptr,
-                        (int) ResultsVisualization::MESH_PREVIEW_AO);
-                ImGui::RadioButton("3D model with UV visualization", ptr,
-                        (int) ResultsVisualization::MESH_PREVIEW_UV);
-                ImGui::RadioButton("2D texture view (occlusion)", ptr,
-                        (int) ResultsVisualization::IMAGE_OCCLUSION);
-                ImGui::RadioButton("2D texture view (bent normals)", ptr,
-                        (int) ResultsVisualization::IMAGE_BENT_NORMALS);
-                ImGui::Unindent();
+                const ResultsVisualization previousVisualization = app.resultsVisualization;
+                using RV = ResultsVisualization;
+                addOption("3D model with original materials", '1', RV::MESH_ORIGINAL);
+                if (app.hasTestRender) {
+                    addOption("Rendered AO test image", '2', RV::IMAGE_OCCLUSION);
+                } else {
+                    addOption("3D model with modified materials", '2', RV::MESH_MODIFIED);
+                    addOption("3D model with new occlusion only", '3', RV::MESH_PREVIEW_AO);
+                    addOption("3D model with UV visualization", '4', RV::MESH_PREVIEW_UV);
+                    addOption("2D texture with occlusion", '5', RV::IMAGE_OCCLUSION);
+                    addOption("2D texture with bent normals", '6', RV::IMAGE_BENT_NORMALS);
+                }
                 if (app.resultsVisualization != previousVisualization) {
                     app.requestOverlayUpdate = true;
                 }
+                ImGui::Unindent();
             }
 
             // Options
