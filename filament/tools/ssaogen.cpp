@@ -121,7 +121,7 @@ int main(int argc, char** argv) {
     std::cout << "const vec3 kSipralSamples[kSpiralSampleCount] = vec3[](" << std::endl;
     const float dalpha = 1.0f / (spiralSampleCount - 0.5f);
     for (size_t i = 0; i < spiralSampleCount; i++) {
-        float radius = 0.5f * dalpha + i * dalpha;
+        float radius = (i + 0.5f) * dalpha;
         float angle = radius * radius * (2 * M_PI * kSpiralTurns);
         if ((i & 0x3) == 0) {
             std::cout << "   ";
@@ -153,6 +153,38 @@ int main(int argc, char** argv) {
         }
     }
     std::cout << ");" << std::endl;
+
+
+    float weightSum = 0;
+    size_t gaussianWidth = 9;   // must be odd
+    const size_t gaussianSampleCount = (gaussianWidth + 1) / 2;
+    std::cout << "const int kGaussianCount = " << gaussianSampleCount << ";" << std::endl;
+    std::cout << "const int kRadius = kGaussianCount - 1;" << std::endl;
+    std::cout << "const float kGaussianSamples[kGaussianCount] = float[](" << std::endl;
+    for (size_t i = 0; i < gaussianSampleCount; i++) {
+        float x = i;
+
+        // q: standard deviation
+        // A gaussian filter requires 6q-1 values to keep its gaussian nature
+        // (see en.wikipedia.org/wiki/Gaussian_filter)
+        //
+        // Cut-off frequency definition:
+        //      fc = 1.1774 / (2pi * q)       (half power frequency or 0.707 amplitude)
+
+        float q = (gaussianWidth + 1) / 6.0;  // ~1.667 for 9 taps
+        float g = (1.0 / (std::sqrt(2.0 * M_PI) * q)) * std::exp(-(x * x) / (2.0 * q * q));
+        weightSum += g * (i == 0 ? 1.0f : 2.0f);
+
+        if ((i & 0x3) == 0) {
+            std::cout << "   ";
+        }
+        std::cout << g << ", ";
+        if ((i & 0x3) == 0x3) {
+            std::cout << std::endl;
+        }
+    }
+    std::cout << ");" << std::endl;
+    std::cout << "const float kGaussianWeightSum = " << weightSum << ";" << std::endl;
 
     return 0;
 }

@@ -155,7 +155,7 @@ fragment {
 
     vec3 tapLocationReference(uint i) {
         const float dalpha = 1.0f / (float(kSpiralSampleCount) - 0.5f);
-        float phi = random(variable_vertex.xy) * 0.5 + 0.5;
+        float phi = random(variable_vertex.xy);
         float radius = (float(i) + phi + 0.5) * dalpha;
         radius *= radius;
         float angle = radius * (7.0 * 6.28318) + phi * 6.28318;
