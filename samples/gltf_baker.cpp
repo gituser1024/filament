@@ -253,12 +253,23 @@ static void updateOverlay(App& app) {
 
 static void updateOverlayTexture(App& app) {
     Engine& engine = *app.engine;
-    int w = app.ambientOcclusion.getWidth();
-    int h = app.ambientOcclusion.getHeight();
-    void* data = app.ambientOcclusion.getPixelRef();
-    Texture::PixelBufferDescriptor buffer(data, size_t(w * h * 4),
-            Texture::Format::R, Texture::Type::FLOAT);
-    app.overlayTexture->setImage(engine, 0, std::move(buffer));
+    image::LinearImage image = app.resultsVisualization == ResultsVisualization::IMAGE_OCCLUSION ?
+            app.ambientOcclusion : app.bentNormals;
+    int width = image.getWidth();
+    int height = image.getHeight();
+    int channels = image.getChannels();
+    void* data = image.getPixelRef();
+    if (channels == 1) {
+        Texture::PixelBufferDescriptor buffer(data, size_t(width * height * sizeof(float)),
+                Texture::Format::R, Texture::Type::FLOAT);
+        app.overlayTexture->setImage(engine, 0, std::move(buffer));
+    } else if (channels == 3) {
+        Texture::PixelBufferDescriptor buffer(data, size_t(width * height * sizeof(float) * 3),
+                Texture::Format::RGB, Texture::Type::FLOAT);
+        app.overlayTexture->setImage(engine, 0, std::move(buffer));
+    } else {
+        puts("Unexpected channel count.");
+    }
 }
 
 static void createOverlayTexture(App& app) {
@@ -689,6 +700,7 @@ int main(int argc, char** argv) {
             // Results
             if (app.ambientOcclusion && ImGui::CollapsingHeader("Results",
                     ImGuiTreeNodeFlags_DefaultOpen)) {
+                const ResultsVisualization previousVisualization = app.resultsVisualization;
                 int* ptr = (int*) &app.resultsVisualization;
                 ImGui::Indent();
                 ImGui::RadioButton("3D model with original materials", ptr,
@@ -704,6 +716,9 @@ int main(int argc, char** argv) {
                 ImGui::RadioButton("2D texture view (bent normals)", ptr,
                         (int) ResultsVisualization::IMAGE_BENT_NORMALS);
                 ImGui::Unindent();
+                if (app.resultsVisualization != previousVisualization) {
+                    app.requestOverlayUpdate = true;
+                }
             }
 
             // Options
