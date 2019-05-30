@@ -255,51 +255,45 @@ static void updateOverlay(App& app) {
 
 static void updateOverlayTexture(App& app) {
     Engine& engine = *app.engine;
-    image::LinearImage image = app.resultsVisualization == ResultsVisualization::IMAGE_OCCLUSION ?
-            app.ambientOcclusion : app.bentNormals;
-    int width = image.getWidth();
-    int height = image.getHeight();
-    int channels = image.getChannels();
-    void* data = image.getPixelRef();
-    if (channels == 1) {
-        Texture::PixelBufferDescriptor buffer(data, size_t(width * height * sizeof(float)),
-                Texture::Format::R, Texture::Type::FLOAT);
-        app.overlayTexture->setImage(engine, 0, std::move(buffer));
-    } else if (channels == 3) {
-        Texture::PixelBufferDescriptor buffer(data, size_t(width * height * sizeof(float) * 3),
-                Texture::Format::RGB, Texture::Type::FLOAT);
-        app.overlayTexture->setImage(engine, 0, std::move(buffer));
-    } else {
-        puts("Unexpected channel count.");
-    }
-}
-
-static void createOverlayTexture(App& app) {
-    Engine& engine = *app.engine;
     using MinFilter = TextureSampler::MinFilter;
     using MagFilter = TextureSampler::MagFilter;
 
-    image::LinearImage image = app.resultsVisualization == ResultsVisualization::IMAGE_OCCLUSION ?
-            app.ambientOcclusion : app.bentNormals;
-    uint32_t width = image.getWidth();
-    uint32_t height = image.getHeight();
-    int channels = image.getChannels();
+    // Gather information about the displayed image.
+    image::LinearImage image;
+    switch (app.resultsVisualization) {
+        case ResultsVisualization::IMAGE_OCCLUSION: image = app.ambientOcclusion; break;
+        case ResultsVisualization::IMAGE_BENT_NORMALS: image = app.bentNormals; break;
+        default: return;
+    }
+    const int width = image.getWidth();
+    const int height = image.getHeight();
+    const int channels = image.getChannels();
+    const void* data = image.getPixelRef();
+    const Texture::InternalFormat internalFormat = channels == 1 ?
+            Texture::InternalFormat::R8 : Texture::InternalFormat::RGB8;
+    const Texture::Format format = channels == 1 ? Texture::Format::R : Texture::Format::RGB;
 
-    auto tex = Texture::Builder()
-            .width(width)
-            .height(height)
-            .levels(1)
-            .sampler(Texture::Sampler::SAMPLER_2D)
-            .format(channels == 1 ? Texture::InternalFormat::R8 : Texture::InternalFormat::RGB8)
-            .build(engine);
+    // Create a brand new texture object if necessary.
+    const Texture* tex = app.overlayTexture;
+    if (!tex || tex->getWidth() != width || tex->getHeight() != height ||
+            tex->getFormat() != internalFormat) {
+        engine.destroy(tex);
+        app.overlayTexture = Texture::Builder()
+                .width(width)
+                .height(height)
+                .levels(1)
+                .sampler(Texture::Sampler::SAMPLER_2D)
+                .format(internalFormat)
+                .build(engine);
+        TextureSampler sampler(MinFilter::LINEAR, MagFilter::LINEAR);
+        app.overlayMaterial->setParameter("luma", app.overlayTexture, sampler);
+        app.overlayMaterial->setParameter("grayscale", channels == 1 ? true : false);
+    }
 
-    TextureSampler sampler(MinFilter::LINEAR, MagFilter::LINEAR);
-    app.overlayMaterial->setParameter("luma", tex, sampler);
-
-    engine.destroy(app.overlayTexture);
-    app.overlayTexture = tex;
-
-    updateOverlayTexture(app);
+    // Upload texture data.
+    Texture::PixelBufferDescriptor buffer(data, size_t(width * height * channels * sizeof(float)),
+            format, Texture::Type::FLOAT);
+    app.overlayTexture->setImage(engine, 0, std::move(buffer));
 }
 
 static void createOverlay(App& app) {
@@ -400,7 +394,7 @@ static void actionTestRender(App& app) {
     viewportSize.x -= app.viewer->getSidebarWidth();
     app.ambientOcclusion = image::LinearImage(viewportSize.x, viewportSize.y, 1);
     app.resultsVisualization = ResultsVisualization::IMAGE_OCCLUSION;
-    createOverlayTexture(app);
+    updateOverlayTexture(app);
 
     // Compute the camera paramaeters for the path tracer.
     // ---------------------------------------------------
@@ -471,7 +465,7 @@ static void actionBakeAo(App& app) {
         app.bentNormals = image::LinearImage(res, res, 3);
         app.meshNormals = image::LinearImage(res, res, 3);
         app.meshPositions = image::LinearImage(res, res, 3);
-        createOverlayTexture(app);
+        updateOverlayTexture(app);
 
         auto onRenderTile = [](ushort2, ushort2, void* userData) {
             App* app = (App*) userData;
@@ -513,12 +507,18 @@ static void actionBakeAo(App& app) {
         ImageEncoder::encode(out, ImageEncoder::Format::PNG_LINEAR, app.ambientOcclusion, "",
                 texPath.c_str());
 
+        // TODO: in theory this work could be moved into the end of parameterizeJob
         app.previewAoAsset = app.pipeline->generatePreview(app.currentAsset, "baked.png");
         app.previewUvAsset = app.pipeline->generatePreview(app.currentAsset, "uvs.png");
+        app.modifiedAsset = app.pipeline->replaceOcclusion(app.currentAsset, "baked.png");
     };
 
     auto parameterizeJob = [&app, doRender] {
         auto pipeline = new gltfio::AssetPipeline();
+
+        app.previewAoAsset = nullptr;
+        app.modifiedAsset = nullptr;
+        app.previewUvAsset = nullptr;
 
         app.statusText = std::make_shared<std::string>("Parameterizing");
         auto parameterized = pipeline->parameterize(app.currentAsset);
@@ -710,7 +710,7 @@ int main(int argc, char** argv) {
                 ImGuiIO& io = ImGui::GetIO();
                 int* ptr = (int*) &app.resultsVisualization;
                 if (io.InputCharacters[0] == num) { app.resultsVisualization = e; }
-                ImGui::RadioButton(msg, ptr, num - '1');
+                ImGui::RadioButton(msg, ptr, (int) e);
                 ImGui::SameLine();
                 ImGui::TextColored({1, 1, 0,1 }, "%c", num);
             };
@@ -722,6 +722,9 @@ int main(int argc, char** argv) {
                 addOption("3D model with original materials", '1', RV::MESH_ORIGINAL);
                 if (app.hasTestRender) {
                     addOption("Rendered AO test image", '2', RV::IMAGE_OCCLUSION);
+                } else if (!app.modifiedAsset) {
+                    addOption("2D texture with occlusion", '2', RV::IMAGE_OCCLUSION);
+                    addOption("2D texture with bent normals", '3', RV::IMAGE_BENT_NORMALS);
                 } else {
                     addOption("3D model with modified materials", '2', RV::MESH_MODIFIED);
                     addOption("3D model with new occlusion only", '3', RV::MESH_PREVIEW_AO);
