@@ -857,7 +857,7 @@ void Pipeline::bakeTransform(BakedPrim* prim, const mat4f& transform, const mat3
         float4* bakedTangents = prim->bakedTangents;
         for (cgltf_size index = 0; index < numTangents; ++index) {
             float3& t = bakedTangents[index].xyz;
-            t = normalMatrix * t;
+            t = normalize(normalMatrix * t);
         }
     }
 }
