@@ -379,7 +379,7 @@ static void loadAssetFromDisk(App& app) {
     FilamentApp::get().setWindowTitle(app.filename.getName().c_str());
 }
 
-static void actionTestRender(App& app) {
+static void executeTestRender(App& app) {
     app.isWorking = true;
     app.hasTestRender = true;
 
@@ -444,7 +444,7 @@ static void generateUvVisualization(const utils::Path& pngOutputPath) {
             pngOutputPath.c_str());
 }
 
-static void actionBakeAo(App& app) {
+static void executeBakeAo(App& app) {
     using namespace image;
     using filament::math::ushort2;
 
@@ -521,7 +521,7 @@ static void actionBakeAo(App& app) {
     }
 }
 
-static void actionExport(App& app) {
+static void executeExport(App& app) {
     const utils::Path folder = app.filename.getAbsolutePath().getParent();
     const utils::Path binPath = folder + "baked.bin";
     const utils::Path outPath = folder + "baked.gltf";
@@ -610,50 +610,48 @@ int main(int argc, char** argv) {
             ImGui::Spacing();
             ImGui::BeginGroup();
 
+            using OnClick = void(*)(App& app);
+            auto showActonButton = [&](const char* label, int cornerFlags, OnClick fn) {
+                pos = ImGui::GetCursorScreenPos();
+                color = enabled ? enabledColor : disabledColor;
+                color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hoveredColor : color;
+                ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color,
+                        ImGui::GetStyle().FrameRounding, cornerFlags);
+                ImGui::PushStyleColor(ImGuiCol_Button, color);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, color);
+                if (ImGui::Button(label, buttonSize) && enabled) {
+                    fn(app);
+                }
+                ImGui::PopStyleColor();
+                ImGui::PopStyleColor();
+            };
+
             // TEST RENDER
             ImGui::SameLine(buttonPositions[0]);
-            pos = ImGui::GetCursorScreenPos();
             enabled = !app.isWorking;
-            color = enabled ? enabledColor : disabledColor;
-            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hoveredColor : color;
-            ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color,
-                    ImGui::GetStyle().FrameRounding, ImDrawCornerFlags_Left);
-            if (ImGui::Button("Test Render", buttonSize) && enabled) {
-                actionTestRender(app);
-            }
+            showActonButton("Test Render", ImDrawCornerFlags_Left, [](App& app) {
+                executeTestRender(app);
+            });
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Renders the asset from the current camera using a pathtracer.");
             }
 
             // BAKE
             ImGui::SameLine(buttonPositions[1]);
-            pos = ImGui::GetCursorScreenPos();
             enabled = !app.isWorking;
-            color = enabled ? enabledColor : disabledColor;
-            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hoveredColor : color;
-            ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color);
-            if (ImGui::Button("Bake AO", buttonSize) && enabled) {
-                actionBakeAo(app);
-            }
+            showActonButton("Bake AO", 0, [](App& app) {
+                executeBakeAo(app);
+            });
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Generates a new set of UVs and invokes a pathtracer.");
             }
 
             // EXPORT
             ImGui::SameLine(buttonPositions[2]);
-            pos = ImGui::GetCursorScreenPos();
             enabled = !app.isWorking && !app.hasTestRender && app.modifiedAsset;
-            color = enabled ? enabledColor : disabledColor;
-            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hoveredColor : color;
-            ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color,
-                    ImGui::GetStyle().FrameRounding, ImDrawCornerFlags_Right);
-            ImGui::PushStyleColor(ImGuiCol_Button, color);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, color);
-            if (ImGui::Button("Export...", buttonSize) && enabled) {
+            showActonButton("Export...", ImDrawCornerFlags_Right, [](App& app) {
                 ImGui::OpenPopup("Export options");
-            }
-            ImGui::PopStyleColor();
-            ImGui::PopStyleColor();
+            });
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Saves the baked result to disk.");
             }
@@ -746,7 +744,7 @@ int main(int argc, char** argv) {
                 ImGui::RadioButton("Preserve materials", (int*) &app.exportOption, 2);
                 if (ImGui::Button("OK", ImVec2(120,0))) {
                     ImGui::CloseCurrentPopup();
-                    actionExport(app);
+                    executeExport(app);
                 }
                 ImGui::EndPopup();
             }
