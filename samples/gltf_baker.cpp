@@ -15,7 +15,6 @@
  */
 
 #define GLTFIO_SIMPLEVIEWER_IMPLEMENTATION
-#define DEBUG_PATHTRACER 0
 
 #include "app/Config.h"
 #include "app/FilamentApp.h"
@@ -62,8 +61,8 @@ enum AppState {
     EMPTY,
     LOADED,
     RENDERING,
-    PARAMETRIZING,
-    PARAMETRIZED,
+    PARAMETERIZING,
+    PARAMETERIZED,
     BAKING,
     BAKED,
     EXPORTED,
@@ -85,12 +84,12 @@ enum ExportOption : int {
 };
 
 struct App {
-    Engine* engine;
-    Camera* camera;
-    SimpleViewer* viewer;
+    Engine* engine = nullptr;
+    Camera* camera = nullptr;
+    SimpleViewer* viewer = nullptr;
     Config config;
-    NameComponentManager* names;
-    MaterialProvider* materials;
+    NameComponentManager* names = nullptr;
+    MaterialProvider* materials = nullptr;
     View* overlayView = nullptr;
     Scene* overlayScene = nullptr;
     VertexBuffer* overlayVb = nullptr;
@@ -119,7 +118,7 @@ struct App {
     AppState state = EMPTY;
     utils::Path filename;
     ResultsVisualization resultsVisualization = ResultsVisualization::MESH_ORIGINAL;
-    AppState pushedState;
+    AppState pushedState = EMPTY;
     uint32_t bakeResolution = 1024;
     int samplesPerPixel = 256;
     ExportOption exportOption = PRESERVE_MATERIALS;
@@ -127,20 +126,13 @@ struct App {
     // Secondary threads might write to the following fields.
     std::shared_ptr<std::string> statusText;
     std::shared_ptr<std::string> messageBoxText;
-    std::atomic<bool> requestOverlayUpdate;
+    std::atomic<bool> requestViewerUpdate;
     std::atomic<bool> requestStatePop;
 };
 
 struct OverlayVertex {
     filament::math::float2 position;
     filament::math::float2 uv;
-};
-
-static OverlayVertex OVERLAY_VERTICES[4] = {
-    {{0, 0}, {0, 0}},
-    {{ 1000, 0}, {1, 0}},
-    {{0,  1000}, {0, 1}},
-    {{ 1000,  1000}, {1, 1}},
 };
 
 static const char* DEFAULT_IBL = "envs/venetian_crossroads";
@@ -224,7 +216,40 @@ static void loadIniFile(App& app) {
     }
 }
 
-static void updateOverlayVerts(App& app) {
+static void createQuadRenderable(App& app) {
+    auto& rcm = app.engine->getRenderableManager();
+    Engine& engine = *app.engine;
+
+    static constexpr uint16_t OVERLAY_INDICES[6] = { 0, 1, 2, 3, 2, 1 };
+    static OverlayVertex OVERLAY_VERTICES[4] = {
+            {{0, 0}, {0, 0}},
+            {{ 1000, 0}, {1, 0}},
+            {{0,  1000}, {0, 1}},
+            {{ 1000,  1000}, {1, 1}},
+    };
+
+    if (!app.overlayEntity) {
+        app.overlayVb = VertexBuffer::Builder()
+                .vertexCount(4)
+                .bufferCount(1)
+                .attribute(VertexAttribute::POSITION, 0, VertexBuffer::AttributeType::FLOAT2, 0, 16)
+                .attribute(VertexAttribute::UV0, 0, VertexBuffer::AttributeType::FLOAT2, 8, 16)
+                .build(engine);
+        app.overlayIb = IndexBuffer::Builder()
+                .indexCount(6)
+                .bufferType(IndexBuffer::IndexType::USHORT)
+                .build(engine);
+        app.overlayIb->setBuffer(engine,
+                IndexBuffer::BufferDescriptor(OVERLAY_INDICES, 12, nullptr));
+        auto mat = Material::Builder()
+                .package(RESOURCES_AOPREVIEW_DATA, RESOURCES_AOPREVIEW_SIZE)
+                .build(engine);
+        app.overlayMaterial = mat->createInstance();
+        app.overlayEntity = EntityManager::get().create();
+    }
+
+    auto vb = app.overlayVb;
+    auto ib = app.overlayIb;
     auto viewportSize = ImGui::GetIO().DisplaySize;
     viewportSize.x -= app.viewer->getSidebarWidth();
     OVERLAY_VERTICES[0].position.x = app.viewer->getSidebarWidth();
@@ -233,13 +258,6 @@ static void updateOverlayVerts(App& app) {
     OVERLAY_VERTICES[3].position.x = app.viewer->getSidebarWidth() + viewportSize.x;
     OVERLAY_VERTICES[2].position.y = viewportSize.y;
     OVERLAY_VERTICES[3].position.y = viewportSize.y;
-};
-
-static void updateOverlay(App& app) {
-    auto& rcm = app.engine->getRenderableManager();
-    auto vb = app.overlayVb;
-    auto ib = app.overlayIb;
-    updateOverlayVerts(app);
     vb->setBufferAt(*app.engine, 0,
             VertexBuffer::BufferDescriptor(OVERLAY_VERTICES, 64, nullptr));
     rcm.destroy(app.overlayEntity);
@@ -253,7 +271,37 @@ static void updateOverlay(App& app) {
             .build(*app.engine, app.overlayEntity);
 }
 
-static void updateOverlayTexture(App& app) {
+static void updateViewerMesh(App& app) {
+    gltfio::AssetPipeline::AssetHandle handle;
+    switch (app.resultsVisualization) {
+        case ResultsVisualization::MESH_ORIGINAL: handle = app.currentAsset; break;
+        case ResultsVisualization::MESH_MODIFIED: handle = app.modifiedAsset; break;
+        case ResultsVisualization::MESH_PREVIEW_AO: handle = app.previewAoAsset; break;
+        case ResultsVisualization::MESH_PREVIEW_UV: handle = app.previewUvAsset; break;
+        default: return;
+    }
+
+    if (!app.viewerAsset || app.viewerAsset->getSourceAsset() != handle) {
+        app.viewerAsset = app.loader->createAssetFromHandle(handle);
+
+        // Load external textures and buffers.
+        gltfio::ResourceLoader({
+            .engine = app.engine,
+            .gltfPath = app.filename.getAbsolutePath(),
+            .normalizeSkinningWeights = true,
+            .recomputeBoundingBoxes = false
+        }).loadResources(app.viewerAsset);
+
+        // Load animation data then free the source hierarchy.
+        app.viewerAsset->getAnimator();
+        app.state = AssetPipeline::isParameterized(handle) ? PARAMETERIZED : LOADED;
+
+        // Destroy the old currentAsset and add the renderables to the scene.
+        app.viewer->setAsset(app.viewerAsset, app.names, !app.actualSize);
+    }
+}
+
+static void updateViewerImage(App& app) {
     Engine& engine = *app.engine;
     using MinFilter = TextureSampler::MinFilter;
     using MagFilter = TextureSampler::MagFilter;
@@ -287,7 +335,7 @@ static void updateOverlayTexture(App& app) {
                 .build(engine);
         TextureSampler sampler(MinFilter::LINEAR, MagFilter::LINEAR);
         app.overlayMaterial->setParameter("luma", app.overlayTexture, sampler);
-        app.overlayMaterial->setParameter("grayscale", channels == 1 ? true : false);
+        app.overlayMaterial->setParameter("grayscale", channels == 1);
     }
 
     // Upload texture data.
@@ -296,66 +344,29 @@ static void updateOverlayTexture(App& app) {
     app.overlayTexture->setImage(engine, 0, std::move(buffer));
 }
 
-static void createOverlay(App& app) {
-    Engine& engine = *app.engine;
-
-    static constexpr uint16_t OVERLAY_INDICES[6] = { 0, 1, 2, 3, 2, 1 };
-
-    auto vb = VertexBuffer::Builder()
-            .vertexCount(4)
-            .bufferCount(1)
-            .attribute(VertexAttribute::POSITION, 0, VertexBuffer::AttributeType::FLOAT2, 0, 16)
-            .attribute(VertexAttribute::UV0, 0, VertexBuffer::AttributeType::FLOAT2, 8, 16)
-            .build(engine);
-    auto ib = IndexBuffer::Builder()
-            .indexCount(6)
-            .bufferType(IndexBuffer::IndexType::USHORT)
-            .build(engine);
-    ib->setBuffer(engine,
-            IndexBuffer::BufferDescriptor(OVERLAY_INDICES, 12, nullptr));
-    auto mat = Material::Builder()
-            .package(RESOURCES_AOPREVIEW_DATA, RESOURCES_AOPREVIEW_SIZE)
-            .build(engine);
-    auto matInstance = mat->createInstance();
-
-    app.overlayVb = vb;
-    app.overlayIb = ib;
-    app.overlayEntity = EntityManager::get().create();
-    app.overlayMaterial = matInstance;
+static void updateViewer(App& app) {
+    switch (app.resultsVisualization) {
+        case ResultsVisualization::MESH_ORIGINAL:
+        case ResultsVisualization::MESH_MODIFIED:
+        case ResultsVisualization::MESH_PREVIEW_AO:
+        case ResultsVisualization::MESH_PREVIEW_UV:
+            updateViewerMesh(app);
+            break;
+        case ResultsVisualization::IMAGE_OCCLUSION:
+        case ResultsVisualization::IMAGE_BENT_NORMALS:
+            updateViewerImage(app);
+            break;
+    }
 }
 
-static void loadAsset(App& app, gltfio::AssetPipeline::AssetHandle handle) {
-
-    app.currentAsset = handle;
-    app.viewerAsset = app.loader->createAssetFromHandle(handle);
-
-    // Load external textures and buffers.
-    gltfio::ResourceLoader({
-        .engine = app.engine,
-        .gltfPath = app.filename.getAbsolutePath(),
-        .normalizeSkinningWeights = true,
-        .recomputeBoundingBoxes = false
-    }).loadResources(app.viewerAsset);
-
-    // Load animation data then free the source hierarchy.
-    app.viewerAsset->getAnimator();
-    app.state = AssetPipeline::isParameterized(handle) ? PARAMETRIZED : LOADED;
-
-    // Destroy the old currentAsset and add the renderables to the scene.
-    app.viewer->setAsset(app.viewerAsset, app.names, !app.actualSize);
-}
-
-static void loadAsset(App& app) {
+static void loadAssetFromDisk(App& app) {
     std::cout << "Loading " << app.filename << "..." << std::endl;
-
     if (app.filename.getExtension() == "glb") {
         std::cerr << "GLB files are not yet supported." << std::endl;
         exit(1);
     }
 
-    // Reset the pipeline to free memory.
     auto pipeline = new gltfio::AssetPipeline();
-
     gltfio::AssetPipeline::AssetHandle handle = pipeline->load(app.filename);
     if (!handle) {
         delete pipeline;
@@ -364,7 +375,7 @@ static void loadAsset(App& app) {
     }
 
     if (!gltfio::AssetPipeline::isFlattened(handle)) {
-        handle = pipeline->flatten(handle);
+        handle = pipeline->flatten(handle, AssetPipeline::FILTER_TRIANGLES);
         if (!handle) {
             delete pipeline;
             puts("Unable to flatten model");
@@ -372,13 +383,13 @@ static void loadAsset(App& app) {
         }
     }
 
+    // Destroying the previous pipeline frees memory for the previously-loaded asset.
     delete app.pipeline;
     app.pipeline = pipeline;
 
     app.viewer->setIndirectLight(FilamentApp::get().getIBL()->getIndirectLight());
-
-    loadAsset(app, handle);
-
+    app.currentAsset = handle;
+    app.requestViewerUpdate = true;
     FilamentApp::get().setWindowTitle(app.filename.getName().c_str());
 }
 
@@ -392,9 +403,8 @@ static void actionTestRender(App& app) {
     // Allocate the render target for the path tracer as well as a GPU texture to display it.
     auto viewportSize = ImGui::GetIO().DisplaySize;
     viewportSize.x -= app.viewer->getSidebarWidth();
-    app.ambientOcclusion = image::LinearImage(viewportSize.x, viewportSize.y, 1);
+    app.ambientOcclusion = image::LinearImage((uint32_t) viewportSize.x, (uint32_t) viewportSize.y, 1);
     app.resultsVisualization = ResultsVisualization::IMAGE_OCCLUSION;
-    updateOverlayTexture(app);
 
     // Compute the camera paramaeters for the path tracer.
     // ---------------------------------------------------
@@ -422,12 +432,12 @@ static void actionTestRender(App& app) {
     using filament::math::ushort2;
     auto onRenderTile = [](ushort2, ushort2, void* userData) {
         App* app = (App*) userData;
-        app->requestOverlayUpdate = true;
+        app->requestViewerUpdate = true;
     };
     auto onRenderDone = [](void* userData) {
         App* app = (App*) userData;
         app->requestStatePop = true;
-        app->requestOverlayUpdate = true;
+        app->requestViewerUpdate = true;
     };
     app.pipeline->renderAmbientOcclusion(currentAsset, app.ambientOcclusion, camera, onRenderTile,
             onRenderDone, &app);
@@ -458,89 +468,64 @@ static void actionBakeAo(App& app) {
     auto doRender = [&app] {
         app.state = BAKING;
 
-        // Allocate the render target for the path tracer as well as a GPU texture to display it.
         const uint32_t res = app.bakeResolution;
         app.resultsVisualization = ResultsVisualization::IMAGE_OCCLUSION;
         app.ambientOcclusion = image::LinearImage(res, res, 1);
         app.bentNormals = image::LinearImage(res, res, 3);
         app.meshNormals = image::LinearImage(res, res, 3);
         app.meshPositions = image::LinearImage(res, res, 3);
-        updateOverlayTexture(app);
 
         auto onRenderTile = [](ushort2, ushort2, void* userData) {
             App* app = (App*) userData;
-            app->requestOverlayUpdate = true;
+            app->requestViewerUpdate = true;
         };
 
         auto onRenderDone = [](void* userData) {
             App* app = (App*) userData;
-            app->requestOverlayUpdate = true;
+            app->requestViewerUpdate = true;
             app->state = BAKED;
 
-            #if DEBUG_PATHTRACER
-            auto fmt = ImageEncoder::Format::PNG_LINEAR;
-            std::ofstream bn("bentNormals.png", std::ios::binary | std::ios::trunc);
-            image::LinearImage img = image::verticalFlip(image::vectorsToColors(app->bentNormals));
-            ImageEncoder::encode(bn, fmt, img, "", "bentNormals.png");
-            std::ofstream mn("meshNormals.png", std::ios::binary | std::ios::trunc);
-            img = image::verticalFlip(image::vectorsToColors(app->meshNormals));
-            ImageEncoder::encode(mn, fmt, img, "", "meshNormals.png");
-            std::ofstream mp("meshPositions.png", std::ios::binary | std::ios::trunc);
-            img = image::verticalFlip(image::vectorsToColors(app->meshPositions));
-            ImageEncoder::encode(mp, fmt, img, "", "meshPositions.png");
-            #endif
+            const utils::Path folder = app->filename.getAbsolutePath().getParent();
+            const utils::Path binPath = folder + "baked.bin";
+            const utils::Path outPath = folder + "baked.gltf";
+            const utils::Path texPath = folder + "baked.png";
+
+            generateUvVisualization(folder + "uvs.png");
+
+            std::ofstream out(texPath.c_str(), std::ios::binary | std::ios::trunc);
+            ImageEncoder::encode(out, ImageEncoder::Format::PNG_LINEAR, app->ambientOcclusion, "",
+                    texPath.c_str());
+
+            app->previewAoAsset = app->pipeline->generatePreview(app->currentAsset, "baked.png");
+            app->previewUvAsset = app->pipeline->generatePreview(app->currentAsset, "uvs.png");
+            app->modifiedAsset = app->pipeline->replaceOcclusion(app->currentAsset, "baked.png");
         };
 
         image::LinearImage outputs[] = {
             app.ambientOcclusion, app.bentNormals, app.meshNormals, app.meshPositions
         };
         app.pipeline->bakeAllOutputs(app.currentAsset, outputs, onRenderTile, onRenderDone, &app);
-
-        const utils::Path folder = app.filename.getAbsolutePath().getParent();
-        const utils::Path binPath = folder + "baked.bin";
-        const utils::Path outPath = folder + "baked.gltf";
-        const utils::Path texPath = folder + "baked.png";
-
-        generateUvVisualization(folder + "uvs.png");
-
-        std::ofstream out(texPath.c_str(), std::ios::binary | std::ios::trunc);
-        ImageEncoder::encode(out, ImageEncoder::Format::PNG_LINEAR, app.ambientOcclusion, "",
-                texPath.c_str());
-
-        // TODO: in theory this work could be moved into the end of parameterizeJob
-        app.previewAoAsset = app.pipeline->generatePreview(app.currentAsset, "baked.png");
-        app.previewUvAsset = app.pipeline->generatePreview(app.currentAsset, "uvs.png");
-        app.modifiedAsset = app.pipeline->replaceOcclusion(app.currentAsset, "baked.png");
     };
 
     auto parameterizeJob = [&app, doRender] {
-        auto pipeline = new gltfio::AssetPipeline();
-
         app.previewAoAsset = nullptr;
         app.modifiedAsset = nullptr;
         app.previewUvAsset = nullptr;
-
+        app.ambientOcclusion = LinearImage();
         app.statusText = std::make_shared<std::string>("Parameterizing");
-        auto parameterized = pipeline->parameterize(app.currentAsset);
+        auto parameterized = app.pipeline->parameterize(app.currentAsset);
         app.statusText.reset();
-
         if (!parameterized) {
             app.messageBoxText = std::make_shared<std::string>(
                     "Unable to parameterize mesh, check terminal output for details.");
             app.pushedState = LOADED;
             app.requestStatePop = true;
-            delete pipeline;
             return;
         }
-
-        loadAsset(app, parameterized);
-
-        app.pushedState = PARAMETRIZED;
+        app.currentAsset = parameterized;
+        app.requestViewerUpdate = true;
+        app.pushedState = PARAMETERIZED;
         app.requestStatePop = true;
-
-        delete app.pipeline;
-        app.pipeline = pipeline;
-
         doRender();
     };
 
@@ -548,7 +533,7 @@ static void actionBakeAo(App& app) {
         puts("Already parameterized.");
         doRender();
     } else {
-        app.state = PARAMETRIZING;
+        app.state = PARAMETERIZING;
         utils::JobSystem* js = utils::JobSystem::getJobSystem();
         utils::JobSystem::Job* parent = js->createJob();
         utils::JobSystem::Job* prep = utils::jobs::createJob(*js, parent, parameterizeJob);
@@ -581,7 +566,7 @@ int main(int argc, char** argv) {
 
     app.config.title = "gltf_baker";
     app.config.iblDirectory = FilamentApp::getRootPath() + DEFAULT_IBL;
-    app.requestOverlayUpdate = false;
+    app.requestViewerUpdate = false;
     app.requestStatePop = false;
 
     int option_index = handleCommandLineArguments(argc, argv, &app);
@@ -594,7 +579,7 @@ int main(int argc, char** argv) {
         }
         if (app.filename.isDirectory()) {
             auto files = app.filename.listContents();
-            for (auto file : files) {
+            for (const auto& file : files) {
                 if (file.getExtension() == "gltf") {
                     app.filename = file;
                     break;
@@ -612,24 +597,29 @@ int main(int argc, char** argv) {
     auto setup = [&](Engine* engine, View* view, Scene* scene) {
         app.engine = engine;
         app.names = new NameComponentManager(EntityManager::get());
-        app.viewer = new SimpleViewer(engine, scene, view, SimpleViewer::FLAG_COLLAPSED);
+
+        const int kInitialSidebarWidth = 322;
+        app.viewer = new SimpleViewer(engine, scene, view, SimpleViewer::FLAG_COLLAPSED,
+                kInitialSidebarWidth);
+        app.viewer->enableSunlight(false);
+        app.viewer->enableSSAO(false);
+        app.viewer->setIBLIntensity(50000.0f);
+
         app.materials = createMaterialGenerator(engine);
         app.loader = AssetLoader::create({engine, app.materials, app.names });
         app.camera = &view->getCamera();
 
         if (!app.filename.isEmpty()) {
-            loadAsset(app);
+            loadAssetFromDisk(app);
             saveIniFile(app);
         }
-
-        createOverlay(app);
 
         app.viewer->setUiCallback([&app, scene] () {
             const ImU32 disabled = ImColor(ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
             const ImU32 hovered = ImColor(ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);
             const ImU32 enabled = ImColor(0.5f, 0.5f, 0.0f);
             const ImVec2 buttonSize(100, 50);
-            const float buttonPositions[] = { 0, buttonSize.x + 2, buttonSize.x * 2 + 3 };
+            const float buttonPositions[] = { 0, 2 + buttonSize.x, 4 + buttonSize.x * 2 };
             ImVec2 pos;
             ImU32 color;
 
@@ -670,7 +660,7 @@ int main(int argc, char** argv) {
             ImGui::SameLine(buttonPositions[2]);
             pos = ImGui::GetCursorScreenPos();
             color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hovered : enabled;
-            const bool canExport = app.state == BAKED;
+            const bool canExport = app.ambientOcclusion && !app.hasTestRender && app.modifiedAsset;
             color = canExport ? color : disabled;
             ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color,
                     ImGui::GetStyle().FrameRounding, ImDrawCornerFlags_Right);
@@ -733,7 +723,7 @@ int main(int argc, char** argv) {
                     addOption("2D texture with bent normals", '6', RV::IMAGE_BENT_NORMALS);
                 }
                 if (app.resultsVisualization != previousVisualization) {
-                    app.requestOverlayUpdate = true;
+                    app.requestViewerUpdate = true;
                 }
                 ImGui::Unindent();
             }
@@ -741,13 +731,13 @@ int main(int argc, char** argv) {
             // Options
             if (ImGui::CollapsingHeader("Bake Options")) {
                 ImGui::InputInt("Samples per pixel", &app.samplesPerPixel);
-                static const int kFirstOption = std::log2(512);
-                int bakeOption = std::log2(app.bakeResolution) - kFirstOption;
+                static const int kFirstOption = (int) std::log2(512);
+                int bakeOption = (int) std::log2(app.bakeResolution) - kFirstOption;
                 ImGui::Combo("Texture size", &bakeOption,
                         "512 x 512\0"
                         "1024 x 1024\0"
                         "2048 x 2048\0");
-                app.bakeResolution = 1 << (bakeOption + kFirstOption);
+                app.bakeResolution = 1u << uint32_t(bakeOption + kFirstOption);
             }
 
             // Modals
@@ -807,13 +797,13 @@ int main(int argc, char** argv) {
         if (app.overlayScene) {
             app.overlayScene->remove(app.overlayEntity);
             if (showOverlay) {
-                updateOverlay(app);
+                createQuadRenderable(app);
                 app.overlayScene->addEntity(app.overlayEntity);
             }
         }
-        if (app.requestOverlayUpdate) {
-            updateOverlayTexture(app);
-            app.requestOverlayUpdate = false;
+        if (app.requestViewerUpdate) {
+            updateViewer(app);
+            app.requestViewerUpdate = false;
         }
         if (app.requestStatePop) {
             app.state = app.pushedState;
@@ -833,7 +823,7 @@ int main(int argc, char** argv) {
     filamentApp.setDropHandler([&] (std::string path) {
         app.viewer->removeAsset();
         app.filename = path;
-        loadAsset(app);
+        loadAssetFromDisk(app);
         saveIniFile(app);
     });
 
