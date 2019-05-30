@@ -57,17 +57,6 @@ static inline ImVec2 operator+(const ImVec2& lhs, const ImVec2& rhs) {
     return { lhs.x+rhs.x, lhs.y+rhs.y };
 }
 
-enum AppState {
-    EMPTY,
-    LOADED,
-    RENDERING,
-    PARAMETERIZING,
-    PARAMETERIZED,
-    BAKING,
-    BAKED,
-    EXPORTED,
-};
-
 enum class ResultsVisualization : int {
     MESH_ORIGINAL,
     MESH_MODIFIED,
@@ -108,17 +97,16 @@ struct App {
     gltfio::AssetPipeline::AssetHandle previewUvAsset = nullptr;
 
     bool hasTestRender = false;
+    bool isWorking = false;
 
     image::LinearImage ambientOcclusion;
     image::LinearImage bentNormals;
     image::LinearImage meshNormals;
     image::LinearImage meshPositions;
 
-    bool actualSize = false;
-    AppState state = EMPTY;
+    bool viewerActualSize = false;
     utils::Path filename;
     ResultsVisualization resultsVisualization = ResultsVisualization::MESH_ORIGINAL;
-    AppState pushedState = EMPTY;
     uint32_t bakeResolution = 1024;
     int samplesPerPixel = 256;
     ExportOption exportOption = PRESERVE_MATERIALS;
@@ -127,7 +115,6 @@ struct App {
     std::shared_ptr<std::string> statusText;
     std::shared_ptr<std::string> messageBoxText;
     std::atomic<bool> requestViewerUpdate;
-    std::atomic<bool> requestStatePop;
 };
 
 struct OverlayVertex {
@@ -150,7 +137,7 @@ static void printUsage(char* name) {
         "   --help, -h\n"
         "       Prints this message\n\n"
         "   --actual-size, -s\n"
-        "       Do not scale the model to fit into a unit cube\n\n"
+        "       Do not scale the model to fit into a unit cube in the viewer\n\n"
     );
     const std::string from("SHOWCASE");
     for (size_t pos = usage.find(from); pos != std::string::npos; pos = usage.find(from, pos)) {
@@ -176,7 +163,7 @@ static int handleCommandLineArguments(int argc, char* argv[], App* app) {
                 printUsage(argv[0]);
                 exit(0);
             case 's':
-                app->actualSize = true;
+                app->viewerActualSize = true;
                 break;
         }
     }
@@ -294,10 +281,9 @@ static void updateViewerMesh(App& app) {
 
         // Load animation data then free the source hierarchy.
         app.viewerAsset->getAnimator();
-        app.state = AssetPipeline::isParameterized(handle) ? PARAMETERIZED : LOADED;
 
         // Destroy the old currentAsset and add the renderables to the scene.
-        app.viewer->setAsset(app.viewerAsset, app.names, !app.actualSize);
+        app.viewer->setAsset(app.viewerAsset, app.names, !app.viewerActualSize);
     }
 }
 
@@ -394,8 +380,7 @@ static void loadAssetFromDisk(App& app) {
 }
 
 static void actionTestRender(App& app) {
-    app.pushedState = app.state;
-    app.state = RENDERING;
+    app.isWorking = true;
     app.hasTestRender = true;
 
     gltfio::AssetPipeline::AssetHandle currentAsset = app.currentAsset;
@@ -436,8 +421,8 @@ static void actionTestRender(App& app) {
     };
     auto onRenderDone = [](void* userData) {
         App* app = (App*) userData;
-        app->requestStatePop = true;
         app->requestViewerUpdate = true;
+        app->isWorking = false;
     };
     app.pipeline->renderAmbientOcclusion(currentAsset, app.ambientOcclusion, camera, onRenderTile,
             onRenderDone, &app);
@@ -464,10 +449,9 @@ static void actionBakeAo(App& app) {
     using filament::math::ushort2;
 
     app.hasTestRender = false;
+    app.isWorking = true;
 
     auto doRender = [&app] {
-        app.state = BAKING;
-
         const uint32_t res = app.bakeResolution;
         app.resultsVisualization = ResultsVisualization::IMAGE_OCCLUSION;
         app.ambientOcclusion = image::LinearImage(res, res, 1);
@@ -483,7 +467,6 @@ static void actionBakeAo(App& app) {
         auto onRenderDone = [](void* userData) {
             App* app = (App*) userData;
             app->requestViewerUpdate = true;
-            app->state = BAKED;
 
             const utils::Path folder = app->filename.getAbsolutePath().getParent();
             const utils::Path binPath = folder + "baked.bin";
@@ -499,6 +482,7 @@ static void actionBakeAo(App& app) {
             app->previewAoAsset = app->pipeline->generatePreview(app->currentAsset, "baked.png");
             app->previewUvAsset = app->pipeline->generatePreview(app->currentAsset, "uvs.png");
             app->modifiedAsset = app->pipeline->replaceOcclusion(app->currentAsset, "baked.png");
+            app->isWorking = false;
         };
 
         image::LinearImage outputs[] = {
@@ -518,14 +502,11 @@ static void actionBakeAo(App& app) {
         if (!parameterized) {
             app.messageBoxText = std::make_shared<std::string>(
                     "Unable to parameterize mesh, check terminal output for details.");
-            app.pushedState = LOADED;
-            app.requestStatePop = true;
+            app.isWorking = false;
             return;
         }
         app.currentAsset = parameterized;
         app.requestViewerUpdate = true;
-        app.pushedState = PARAMETERIZED;
-        app.requestStatePop = true;
         doRender();
     };
 
@@ -533,7 +514,6 @@ static void actionBakeAo(App& app) {
         puts("Already parameterized.");
         doRender();
     } else {
-        app.state = PARAMETERIZING;
         utils::JobSystem* js = utils::JobSystem::getJobSystem();
         utils::JobSystem::Job* parent = js->createJob();
         utils::JobSystem::Job* prep = utils::jobs::createJob(*js, parent, parameterizeJob);
@@ -558,7 +538,6 @@ static void actionExport(App& app) {
             break;
     }
     std::cout << "Generated " << outPath << ", " << binPath << ", and " << texPath << std::endl;
-    app.state = EXPORTED;
 }
 
 int main(int argc, char** argv) {
@@ -567,7 +546,6 @@ int main(int argc, char** argv) {
     app.config.title = "gltf_baker";
     app.config.iblDirectory = FilamentApp::getRootPath() + DEFAULT_IBL;
     app.requestViewerUpdate = false;
-    app.requestStatePop = false;
 
     int option_index = handleCommandLineArguments(argc, argv, &app);
     int num_args = argc - option_index;
@@ -615,18 +593,19 @@ int main(int argc, char** argv) {
         }
 
         app.viewer->setUiCallback([&app, scene] () {
-            const ImU32 disabled = ImColor(ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
-            const ImU32 hovered = ImColor(ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);
-            const ImU32 enabled = ImColor(0.5f, 0.5f, 0.0f);
+            const ImU32 disabledColor = ImColor(ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+            const ImU32 hoveredColor = ImColor(ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);
+            const ImU32 enabledColor = ImColor(0.5f, 0.5f, 0.0f);
             const ImVec2 buttonSize(100, 50);
             const float buttonPositions[] = { 0, 2 + buttonSize.x, 4 + buttonSize.x * 2 };
             ImVec2 pos;
             ImU32 color;
+            bool enabled;
 
             // Begin action buttons
             ImGui::GetStyle().ItemSpacing.x = 1;
             ImGui::GetStyle().FrameRounding = 10;
-            ImGui::PushStyleColor(ImGuiCol_Button, enabled);
+            ImGui::PushStyleColor(ImGuiCol_Button, enabledColor);
             ImGui::Spacing();
             ImGui::Spacing();
             ImGui::BeginGroup();
@@ -634,10 +613,12 @@ int main(int argc, char** argv) {
             // TEST RENDER
             ImGui::SameLine(buttonPositions[0]);
             pos = ImGui::GetCursorScreenPos();
-            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hovered : enabled;
+            enabled = !app.isWorking;
+            color = enabled ? enabledColor : disabledColor;
+            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hoveredColor : color;
             ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color,
                     ImGui::GetStyle().FrameRounding, ImDrawCornerFlags_Left);
-            if (ImGui::Button("Test Render", buttonSize)) {
+            if (ImGui::Button("Test Render", buttonSize) && enabled) {
                 actionTestRender(app);
             }
             if (ImGui::IsItemHovered()) {
@@ -647,9 +628,11 @@ int main(int argc, char** argv) {
             // BAKE
             ImGui::SameLine(buttonPositions[1]);
             pos = ImGui::GetCursorScreenPos();
-            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hovered : enabled;
+            enabled = !app.isWorking;
+            color = enabled ? enabledColor : disabledColor;
+            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hoveredColor : color;
             ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color);
-            if (ImGui::Button("Bake AO", buttonSize)) {
+            if (ImGui::Button("Bake AO", buttonSize) && enabled) {
                 actionBakeAo(app);
             }
             if (ImGui::IsItemHovered()) {
@@ -659,14 +642,14 @@ int main(int argc, char** argv) {
             // EXPORT
             ImGui::SameLine(buttonPositions[2]);
             pos = ImGui::GetCursorScreenPos();
-            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hovered : enabled;
-            const bool canExport = app.ambientOcclusion && !app.hasTestRender && app.modifiedAsset;
-            color = canExport ? color : disabled;
+            enabled = !app.isWorking && !app.hasTestRender && app.modifiedAsset;
+            color = enabled ? enabledColor : disabledColor;
+            color = ImGui::IsMouseHoveringRect(pos, pos + buttonSize) ? hoveredColor : color;
             ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + buttonSize, color,
                     ImGui::GetStyle().FrameRounding, ImDrawCornerFlags_Right);
             ImGui::PushStyleColor(ImGuiCol_Button, color);
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, color);
-            if (ImGui::Button("Export...", buttonSize) && canExport) {
+            if (ImGui::Button("Export...", buttonSize) && enabled) {
                 ImGui::OpenPopup("Export options");
             }
             ImGui::PopStyleColor();
@@ -785,30 +768,26 @@ int main(int argc, char** argv) {
 
     auto animate = [&app](Engine* engine, View* view, double now) {
         // The baker doesn't support animation, just use frame 0.
-        if (app.state != EMPTY) {
+        if (app.viewerAsset) {
             app.viewer->applyAnimation(0.0);
         }
-        bool showOverlay = app.resultsVisualization == ResultsVisualization::IMAGE_OCCLUSION ||
-                app.resultsVisualization == ResultsVisualization::IMAGE_BENT_NORMALS;
-        if (!app.overlayScene && showOverlay) {
-            app.overlayView = FilamentApp::get().getGuiView();
-            app.overlayScene = app.overlayView->getScene();
+
+        app.overlayView = FilamentApp::get().getGuiView();
+        app.overlayScene = app.overlayView->getScene();
+        app.overlayScene->remove(app.overlayEntity);
+
+        // Update the overlay quad geometry just in case the window size changed.
+        const bool showOverlay = app.resultsVisualization == ResultsVisualization::IMAGE_OCCLUSION
+                || app.resultsVisualization == ResultsVisualization::IMAGE_BENT_NORMALS;
+        if (showOverlay) {
+            createQuadRenderable(app);
+            app.overlayScene->addEntity(app.overlayEntity);
         }
-        if (app.overlayScene) {
-            app.overlayScene->remove(app.overlayEntity);
-            if (showOverlay) {
-                createQuadRenderable(app);
-                app.overlayScene->addEntity(app.overlayEntity);
-            }
-        }
+
+        // If requested update the overlay quad texture or 3D mesh data.
         if (app.requestViewerUpdate) {
             updateViewer(app);
             app.requestViewerUpdate = false;
-        }
-        if (app.requestStatePop) {
-            app.state = app.pushedState;
-            app.pushedState = EMPTY;
-            app.requestStatePop = false;
         }
     };
 
