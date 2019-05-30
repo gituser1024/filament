@@ -58,18 +58,12 @@ static inline ImVec2 operator+(const ImVec2& lhs, const ImVec2& rhs) {
 }
 
 enum class ResultsVisualization : int {
-    MESH_ORIGINAL,
+    MESH_CURRENT,
     MESH_MODIFIED,
     MESH_PREVIEW_AO,
     MESH_PREVIEW_UV,
     IMAGE_OCCLUSION,
     IMAGE_BENT_NORMALS
-};
-
-enum ExportOption : int {
-    VISUALIZE_AO,
-    VISUALIZE_UV,
-    PRESERVE_MATERIALS,
 };
 
 struct App {
@@ -106,15 +100,22 @@ struct App {
 
     bool viewerActualSize = false;
     utils::Path filename;
-    ResultsVisualization resultsVisualization = ResultsVisualization::MESH_ORIGINAL;
+    ResultsVisualization resultsVisualization = ResultsVisualization::MESH_CURRENT;
     uint32_t bakeResolution = 1024;
     int samplesPerPixel = 256;
-    ExportOption exportOption = PRESERVE_MATERIALS;
+    ResultsVisualization exportOption = ResultsVisualization::MESH_MODIFIED;
 
     // Secondary threads might write to the following fields.
     std::shared_ptr<std::string> statusText;
     std::shared_ptr<std::string> messageBoxText;
     std::atomic<bool> requestViewerUpdate;
+
+    // Export options.
+    char outputFolder[PATH_SIZE];
+    char gltfPath[PATH_SIZE];
+    char binPath[PATH_SIZE];
+    char occlusionPath[PATH_SIZE];
+    char bentNormalsPath[PATH_SIZE];
 };
 
 struct OverlayVertex {
@@ -123,8 +124,8 @@ struct OverlayVertex {
 };
 
 static const char* DEFAULT_IBL = "envs/venetian_crossroads";
-
 static const char* INI_FILENAME = "gltf_baker.ini";
+static constexpr int PATH_SIZE = 256;
 
 static void printUsage(char* name) {
     std::string exec_name(Path(name).getName());
@@ -261,7 +262,7 @@ static void createQuadRenderable(App& app) {
 static void updateViewerMesh(App& app) {
     gltfio::AssetPipeline::AssetHandle handle;
     switch (app.resultsVisualization) {
-        case ResultsVisualization::MESH_ORIGINAL: handle = app.currentAsset; break;
+        case ResultsVisualization::MESH_CURRENT: handle = app.currentAsset; break;
         case ResultsVisualization::MESH_MODIFIED: handle = app.modifiedAsset; break;
         case ResultsVisualization::MESH_PREVIEW_AO: handle = app.previewAoAsset; break;
         case ResultsVisualization::MESH_PREVIEW_UV: handle = app.previewUvAsset; break;
@@ -332,7 +333,7 @@ static void updateViewerImage(App& app) {
 
 static void updateViewer(App& app) {
     switch (app.resultsVisualization) {
-        case ResultsVisualization::MESH_ORIGINAL:
+        case ResultsVisualization::MESH_CURRENT:
         case ResultsVisualization::MESH_MODIFIED:
         case ResultsVisualization::MESH_PREVIEW_AO:
         case ResultsVisualization::MESH_PREVIEW_UV:
@@ -526,22 +527,36 @@ static void executeExport(App& app) {
     const utils::Path binPath = folder + "baked.bin";
     const utils::Path outPath = folder + "baked.gltf";
     const utils::Path texPath = folder + "baked.png";
+    using RV = ResultsVisualization;
     switch (app.exportOption) {
-        case VISUALIZE_AO:
-            app.pipeline->save(app.previewAoAsset, outPath, binPath);
+        case ResultsVisualization::MESH_CURRENT:
+            app.pipeline->save(app.currentAsset, outPath, binPath);
             break;
-        case VISUALIZE_UV:
-            app.pipeline->save(app.previewUvAsset, outPath, binPath);
-            break;
-        case PRESERVE_MATERIALS:
+        case ResultsVisualization::MESH_MODIFIED:
             app.pipeline->save(app.modifiedAsset, outPath, binPath);
             break;
+        case ResultsVisualization::MESH_PREVIEW_AO:
+            app.pipeline->save(app.previewAoAsset, outPath, binPath);
+            break;
+        case ResultsVisualization::IMAGE_OCCLUSION:
+            // TODO
+            break;
+        case ResultsVisualization::IMAGE_BENT_NORMALS:
+            // TODO
+            break;
+        default:
+            return;
     }
     std::cout << "Generated " << outPath << ", " << binPath << ", and " << texPath << std::endl;
 }
 
 int main(int argc, char** argv) {
     App app;
+
+    strncpy(app.gltfPath, "baked.gltf", PATH_SIZE);
+    strncpy(app.binPath, "baked.bin", PATH_SIZE);
+    strncpy(app.occlusionPath, "occlusion.png", PATH_SIZE);
+    strncpy(app.bentNormalsPath, "bentNormals.png", PATH_SIZE);
 
     app.config.title = "gltf_baker";
     app.config.iblDirectory = FilamentApp::getRootPath() + DEFAULT_IBL;
@@ -569,6 +584,9 @@ int main(int argc, char** argv) {
             }
         }
     }
+
+    const utils::Path defaultFolder = app.filename.getAbsolutePath().getParent();
+    strncpy(app.outputFolder, defaultFolder.c_str(), sizeof(app.outputFolder));
 
     loadIniFile(app);
 
@@ -690,7 +708,7 @@ int main(int argc, char** argv) {
                 ImGui::Indent();
                 const ResultsVisualization previousVisualization = app.resultsVisualization;
                 using RV = ResultsVisualization;
-                addOption("3D model with original materials", '1', RV::MESH_ORIGINAL);
+                addOption("3D model with original materials", '1', RV::MESH_CURRENT);
                 if (app.hasTestRender) {
                     addOption("Rendered AO test image", '2', RV::IMAGE_OCCLUSION);
                 } else if (!app.modifiedAsset) {
@@ -738,10 +756,23 @@ int main(int argc, char** argv) {
             }
 
             if (ImGui::BeginPopupModal("Export options", nullptr,
-                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
-                ImGui::RadioButton("Visualize ambient occlusion", (int*) &app.exportOption, 0);
-                ImGui::RadioButton("Visualize generated UVs", (int*) &app.exportOption, 1);
-                ImGui::RadioButton("Preserve materials", (int*) &app.exportOption, 2);
+                    ImGuiWindowFlags_AlwaysAutoResize)) {
+                using RV = ResultsVisualization;
+
+                ImGui::InputText("Folder", app.outputFolder, PATH_SIZE);
+                ImGui::InputText("glTF", app.gltfPath, PATH_SIZE);
+                ImGui::InputText("glTF sidecar bin", app.binPath, PATH_SIZE);
+                ImGui::InputText("Occlusion image", app.occlusionPath, PATH_SIZE);
+                ImGui::InputText("Bent normals image", app.bentNormalsPath, PATH_SIZE);
+
+                auto radio = [&app](const char* name, RV value) {
+                    int* ptr = (int*) &app.exportOption;
+                    ImGui::RadioButton(name, ptr, (int) value);
+                };
+                radio("Export the flattened glTF with original materials", RV::MESH_CURRENT);
+                radio("Export the flattened glTF with modified materials", RV::MESH_MODIFIED);
+                radio("Export the flattened glTF with new occlusion only", RV::MESH_PREVIEW_AO);
+                radio("Export only the occlusion and bent normals images", RV::IMAGE_OCCLUSION);
                 if (ImGui::Button("OK", ImVec2(120,0))) {
                     ImGui::CloseCurrentPopup();
                     executeExport(app);
@@ -800,6 +831,8 @@ int main(int argc, char** argv) {
     filamentApp.setDropHandler([&] (std::string path) {
         app.viewer->removeAsset();
         app.filename = path;
+        const utils::Path defaultFolder = app.filename.getAbsolutePath().getParent();
+        strncpy(app.outputFolder, defaultFolder.c_str(), PATH_SIZE);
         loadAssetFromDisk(app);
         saveIniFile(app);
     });
